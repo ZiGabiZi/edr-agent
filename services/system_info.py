@@ -163,3 +163,9 @@ def collect_system_info(server_url: Optional[str] = None) -> Dict[str, Optional[
         "machine_id_type": machine_id_type,
         "machine_id_hash": hash_identifier(machine_identifier),
     }
+
+
+# Mici ajustari viitor:
+# 1)Case pentru sistemul de operare MacOS
+# 2)Fragilitatea adresei MAC ca identificator stabil
+# 2.1)un fallback pentru a evita problemele în cazul în care adresa MAC nu este disponibilă sau este aceeași pe mai multe mașini (ex: în cazul mașinilor virtuale).
