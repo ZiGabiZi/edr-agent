@@ -4,7 +4,7 @@
 # - colecta date despre endpoint
 # - se inregistreaza la server
 # - trimite events de pornire
-
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -17,6 +17,17 @@ from services.transport import (
     send_event,
 )
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [%(levelname)s] - %(message)s",
+    handlers=[
+        logging.FileHandler("agent.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger("EDRAgent")
 
 def build_agent_registration_payload(
     config: Dict[str, Any],
@@ -60,19 +71,19 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def print_system_info(system_info: Dict[str, Any]) -> None:
+def  log_system_info(system_info: Dict[str, Any]) -> None:
     """
     Afișează informațiile colectate despre endpoint.
     """
 
-    print("[EDR Agent] Collected system information:")
-    print(f"  Hostname: {system_info.get('hostname')}")
-    print(f"  Operating system: {system_info.get('operating_system')}")
-    print(f"  IP address: {system_info.get('ip_address')}")
-    print(f"  Architecture: {system_info.get('architecture')}")
-    print(f"  OS architecture: {system_info.get('os_architecture')}")
-    print(f"  Machine ID type: {system_info.get('machine_id_type')}")
-    print(f"  Machine ID hash: {system_info.get('machine_id_hash')}")
+    logger.info("Collected system information:")
+    logger.info(f"  Hostname: {system_info.get('hostname')}")
+    logger.info(f"  Operating system: {system_info.get('operating_system')}")
+    logger.info(f"  IP address: {system_info.get('ip_address')}")
+    logger.info(f"  Architecture: {system_info.get('architecture')}")
+    logger.info(f"  OS architecture: {system_info.get('os_architecture')}")
+    logger.info(f"  Machine ID type: {system_info.get('machine_id_type')}")
+    logger.info(f"  Machine ID hash: {system_info.get('machine_id_hash')}")
 
 
 def run_agent() -> None:
@@ -87,42 +98,42 @@ def run_agent() -> None:
     5. trimite evenimentul inițial agent_startup.
     """
 
-    print("[EDR Agent] Starting minimal endpoint agent...")
+    logger.info("Starting minimal endpoint agent...")
 
     try:
         config = load_config()
         server_url = config["server_url"]
 
-        print(f"[EDR Agent] Loaded configuration for agent_id={config['agent_id']}")
-        print(f"[EDR Agent] Server URL: {server_url}")
+        logger.info(f"Loaded configuration for agent_id={config['agent_id']}")
+        logger.info(f"Server URL: {server_url}")
 
         system_info = collect_system_info(server_url)
-        print_system_info(system_info)
+        log_system_info(system_info)
 
-        print("[EDR Agent] Checking server health...")
+        logger.info("Checking server health...")
         health_response = check_server_health(server_url)
-        print(f"[EDR Agent] Server health response: {health_response}")
+        logger.info(f"Server health response: {health_response}")
 
-        print("[EDR Agent] Registering agent...")
+        logger.info("Registering agent...")
         agent_payload = build_agent_registration_payload(config, system_info)
         register_response = register_agent(server_url, agent_payload)
-        print(f"[EDR Agent] Register response: {register_response}")
+        logger.info(f"Register response: {register_response}")
 
-        print("[EDR Agent] Sending startup event...")
+        logger.info("Sending startup event...")
         event_payload = build_startup_event_payload(config)
         event_response = send_event(server_url, event_payload)
-        print(f"[EDR Agent] Event response: {event_response}")
+        logger.info(f"Event response: {event_response}")
 
-        print("[EDR Agent] Minimal agent flow completed successfully.")
+        logger.info("Minimal agent flow completed successfully.")
 
     except ConfigError as error:
-        print(f"[EDR Agent] Configuration error: {error}")
+        logger.error(f"Configuration error: {error}")
 
     except TransportError as error:
-        print(f"[EDR Agent] Transport error: {error}")
+        logger.error(f"Transport error: {error}")
 
     except Exception as error:
-        print(f"[EDR Agent] Unexpected error: {error}")
+        logger.exception("Unexpected error occurred:")
 
 
 if __name__ == "__main__":
