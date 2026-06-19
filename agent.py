@@ -1,10 +1,5 @@
-# Agentul minimal va
-# - citi config.json
-# - verifica serverul EDR
-# - colecta date despre endpoint
-# - se inregistreaza la server
-# - trimite events de pornire
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -23,29 +18,23 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s",
     handlers=[
         logging.FileHandler("agent.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler(),
+    ],
 )
 
-logger = logging.getLogger("EDRAgent")
+logger = logging.getLogger(__name__)
+
 
 def build_agent_registration_payload(
     config: Dict[str, Any],
     system_info: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Construiește payload-ul trimis către server pentru înregistrarea agentului.
-
-    Ruta folosită:
-    POST /api/agents/register
-    """
-
+    """Construiește payload-ul trimis către server pentru înregistrarea agentului."""
     return {
         "agent_id": config["agent_id"],
         "hostname": system_info.get("hostname"),
         "operating_system": system_info.get("operating_system"),
         "ip_address": system_info.get("ip_address"),
-
         "agent_version": config.get("agent_version"),
         "machine_id_type": system_info.get("machine_id_type"),
         "machine_id_hash": system_info.get("machine_id_hash"),
@@ -55,13 +44,7 @@ def build_agent_registration_payload(
 
 
 def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Construiește evenimentul inițial trimis de agent după pornire.
-
-    Ruta folosită:
-    POST /api/events
-    """
-
+    """Construiește evenimentul inițial trimis de agent după pornire."""
     current_time = datetime.now(timezone.utc).isoformat()
 
     return {
@@ -71,11 +54,30 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def  log_system_info(system_info: Dict[str, Any]) -> None:
-    """
-    Afișează informațiile colectate despre endpoint.
-    """
+def build_heartbeat_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Construiește evenimentul periodic de heartbeat."""
+    current_time = datetime.now(timezone.utc).isoformat()
 
+    return {
+        "agent_id": config["agent_id"],
+        "event_type": "heartbeat",
+        "description": f"Agent heartbeat at {current_time}",
+    }
+
+
+def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Construiește evenimentul trimis la oprirea controlată a agentului."""
+    current_time = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "agent_id": config["agent_id"],
+        "event_type": "agent_shutdown",
+        "description": f"Agent stopped manually at {current_time}",
+    }
+
+
+def log_system_info(system_info: Dict[str, Any]) -> None:
+    """Înregistrează în log informațiile colectate despre endpoint."""
     logger.info("Collected system information:")
     logger.info(f"  Hostname: {system_info.get('hostname')}")
     logger.info(f"  Operating system: {system_info.get('operating_system')}")
@@ -86,26 +88,50 @@ def  log_system_info(system_info: Dict[str, Any]) -> None:
     logger.info(f"  Machine ID hash: {system_info.get('machine_id_hash')}")
 
 
+def heartbeat_loop(
+    config: Dict[str, Any],
+    server_url: str,
+    heartbeat_interval_seconds: int,
+) -> None:
+    """
+    Rulează bucla principală a agentului.
+
+    Agentul trimite periodic evenimente de tip heartbeat către server.
+    Dacă serverul nu răspunde temporar, agentul nu se oprește, ci loghează eroarea
+    și încearcă din nou la următorul interval.
+    """
+    logger.info(
+        f"Starting heartbeat loop with interval={heartbeat_interval_seconds} seconds."
+    )
+    logger.info("Press CTRL+C to stop the agent manually.")
+
+    while True:
+        try:
+            heartbeat_payload = build_heartbeat_event_payload(config)
+            heartbeat_response = send_event(server_url, heartbeat_payload)
+            logger.info(f"Heartbeat sent successfully: {heartbeat_response}")
+
+        except TransportError as error:
+            logger.error(f"Heartbeat transport error: {error}")
+
+        time.sleep(heartbeat_interval_seconds)
+
+
 def run_agent() -> None:
-    """
-    Rulează fluxul minimal al agentului EDR.
+    """Rulează agentul EDR minimal în mod long-running."""
+    config = None
+    server_url = None
 
-    Pași:
-    1. citește configurația locală;
-    2. colectează informații despre endpoint;
-    3. verifică disponibilitatea serverului;
-    4. înregistrează agentul la server;
-    5. trimite evenimentul inițial agent_startup.
-    """
-
-    logger.info("Starting minimal endpoint agent...")
+    logger.info("Starting endpoint agent...")
 
     try:
         config = load_config()
         server_url = config["server_url"]
+        heartbeat_interval_seconds = config["heartbeat_interval_seconds"]
 
         logger.info(f"Loaded configuration for agent_id={config['agent_id']}")
         logger.info(f"Server URL: {server_url}")
+        logger.info(f"Heartbeat interval: {heartbeat_interval_seconds} seconds")
 
         system_info = collect_system_info(server_url)
         log_system_info(system_info)
@@ -120,11 +146,22 @@ def run_agent() -> None:
         logger.info(f"Register response: {register_response}")
 
         logger.info("Sending startup event...")
-        event_payload = build_startup_event_payload(config)
-        event_response = send_event(server_url, event_payload)
-        logger.info(f"Event response: {event_response}")
+        startup_event_payload = build_startup_event_payload(config)
+        startup_event_response = send_event(server_url, startup_event_payload)
+        logger.info(f"Startup event response: {startup_event_response}")
 
-        logger.info("Minimal agent flow completed successfully.")
+        heartbeat_loop(config, server_url, heartbeat_interval_seconds)
+
+    except KeyboardInterrupt:
+        logger.info("Agent stopped manually by user.")
+
+        if config is not None and server_url is not None:
+            try:
+                shutdown_payload = build_shutdown_event_payload(config)
+                shutdown_response = send_event(server_url, shutdown_payload)
+                logger.info(f"Shutdown event response: {shutdown_response}")
+            except TransportError as error:
+                logger.error(f"Could not send shutdown event: {error}")
 
     except ConfigError as error:
         logger.error(f"Configuration error: {error}")
@@ -132,7 +169,7 @@ def run_agent() -> None:
     except TransportError as error:
         logger.error(f"Transport error: {error}")
 
-    except Exception as error:
+    except Exception:
         logger.exception("Unexpected error occurred:")
 
 

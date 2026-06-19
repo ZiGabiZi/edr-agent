@@ -1,4 +1,5 @@
 .venv
-agent.log
+*.log
+logs/
 __pycache__
 
