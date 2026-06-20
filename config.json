@@ -2,5 +2,10 @@
     "agent_id": "endpoint-01",
     "server_url": "http://192.168.16.10:8000",
     "agent_version": "0.1.0",
-    "heartbeat_interval_seconds": 10
+    "heartbeat_interval_seconds": 10,
+    "monitored_directories": [
+        "C:\\EDR_Test"
+    ],
+    "recursive_monitoring": true
+
 }

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import urlparse
@@ -7,6 +8,8 @@ from urllib.parse import urlparse
 REQUIRED_CONFIG_KEYS = ["agent_id", "server_url", "agent_version"]
 CONFIG_PATH = Path("config.json")
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10
+DEFAULT_MONITORED_DIRECTORIES = [r"C:\EDR_Test"]
+DEFAULT_RECURSIVE_MONITORING = True
 
 
 class ConfigError(Exception):
@@ -38,6 +41,12 @@ def validate_config(config: Dict[str, Any]) -> None:
         ):
             invalid_keys.append("heartbeat_interval_seconds")
 
+    if "recursive_monitoring" in config:
+        recursive_monitoring = config["recursive_monitoring"]
+
+        if not isinstance(recursive_monitoring, bool):
+            invalid_keys.append("recursive_monitoring")
+
     errors = []
 
     if missing_keys:
@@ -59,6 +68,32 @@ def validate_server_url(server_url: str) -> None:
 
     if not parsed.netloc:
         raise ConfigError("server_url must contain a valid hostname")
+    
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise ConfigError(f"Invalid port in server_url: {error}") from error
+
+def validate_monitored_directories(directories: Any) -> None:
+    if not isinstance(directories, list) or not directories:
+        raise ConfigError("monitored_directories must be a non-empty list of directory paths")
+    valid_directories = []
+    for index, directory in enumerate(directories):
+        if not isinstance(directory, str) or not directory.strip():
+            raise ConfigError(f"monitored_directories[{index}] must be a non-empty string")
+        
+    normalized_directories = os.path.normpath(
+        os.path.expanduser(directory.strip())
+    )
+
+    if not Path(normalized_directories).is_absolute():
+        raise ConfigError(
+            f"monitored_directories[{index}] must be an absolute path: "
+            f"{directory}"
+            )
+    valid_directories.append(normalized_directories)
+
+    return valid_directories
 
 
 def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -71,6 +106,24 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     if "heartbeat_interval_seconds" not in normalized_config:
         normalized_config["heartbeat_interval_seconds"] = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+
+    if "monitored_directories" not in normalized_config:
+        normalized_config["monitored_directories"] = DEFAULT_MONITORED_DIRECTORIES
+
+    if "recursive_monitoring" not in normalized_config:
+        normalized_config["recursive_monitoring"] = DEFAULT_RECURSIVE_MONITORING
+
+    unique_directories = []
+    seen_directories = set()
+
+    for directory in normalized_config["monitored_directories"]:
+        directory_key = directory.casefold()
+
+        if directory_key not in seen_directories:
+            unique_directories.append(directory)
+            seen_directories.add(directory_key)
+
+    normalized_config["monitored_directories"] = unique_directories
 
     return normalized_config
 
