@@ -76,11 +76,10 @@ class EventDebouncer:
         """Curăță intrările vechi din dicționarul de evenimente văzute recent.
            Această metodă este apelată periodic pentru a preveni creșterea necontrolată a memoriei.
         """
-        threshold_exceeded = len(self._last_seen) >= _DEBOUNCE_CLEANUP_THRESHOLD
-        time_elapsed = (current_time - self._last_cleanup_time) >= _DEBOUNCE_CLEANUP_INTERVAL_SECONDS
-
-        if not (threshold_exceeded or time_elapsed):
+        if (current_time - self._last_cleanup_time) < _DEBOUNCE_CLEANUP_INTERVAL_SECONDS:
             return
+
+        
         
         cutoff = current_time - self.interval_seconds * 2
 
