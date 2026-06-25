@@ -31,7 +31,7 @@ def normalize_file_path(file_path: str) -> str:
 
     Funcționează atât pe Windows, cât și pe Linux.
     """
-    return os.path.normpath(os.path.abspath(file_path))
+    return os.path.abspath(file_path)
 
 
 def build_file_event_payload(
@@ -76,10 +76,10 @@ class EventDebouncer:
         """Curăță intrările vechi din dicționarul de evenimente văzute recent.
            Această metodă este apelată periodic pentru a preveni creșterea necontrolată a memoriei.
         """
-        if len(self._last_seen) < _DEBOUNCE_CLEANUP_THRESHOLD:
-            return
-        
-        if (current_time - self._last_cleanup_time) < _DEBOUNCE_CLEANUP_INTERVAL_SECONDS:
+        threshold_exceeded = len(self._last_seen) >= _DEBOUNCE_CLEANUP_THRESHOLD
+        time_elapsed = (current_time - self._last_cleanup_time) >= _DEBOUNCE_CLEANUP_INTERVAL_SECONDS
+
+        if not (threshold_exceeded or time_elapsed):
             return
         
         cutoff = current_time - self.interval_seconds * 2
@@ -276,6 +276,11 @@ class FileMonitor:
         Directoarele inexistente sunt ignorate și raportate în log.
         Agentul nu creează automat directoare arbitrare din configurație.
         """
+
+        if self._started:
+            self.logger.warning("File monitoring is already running.")
+            return
+
         valid_directories_count = 0
 
         for directory in self.monitored_directories:
