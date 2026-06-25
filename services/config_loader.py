@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 
@@ -66,7 +66,7 @@ def validate_server_url(server_url: str) -> None:
     if parsed.scheme not in ("http", "https"):
         raise ConfigError("server_url must start with http:// or https://")
 
-    if not parsed.netloc:
+    if not parsed.hostname:
         raise ConfigError("server_url must contain a valid hostname")
     
     try:
@@ -74,24 +74,25 @@ def validate_server_url(server_url: str) -> None:
     except ValueError as error:
         raise ConfigError(f"Invalid port in server_url: {error}") from error
 
-def validate_monitored_directories(directories: Any) -> None:
+def validate_monitored_directories(directories: Any) -> List[str]:
     if not isinstance(directories, list) or not directories:
         raise ConfigError("monitored_directories must be a non-empty list of directory paths")
     valid_directories = []
+
     for index, directory in enumerate(directories):
         if not isinstance(directory, str) or not directory.strip():
             raise ConfigError(f"monitored_directories[{index}] must be a non-empty string")
         
-    normalized_directories = os.path.normpath(
-        os.path.expanduser(directory.strip())
-    )
+        normalized_directorie = os.path.normpath(
+            os.path.expanduser(directory.strip())
+        )
 
-    if not Path(normalized_directories).is_absolute():
-        raise ConfigError(
-            f"monitored_directories[{index}] must be an absolute path: "
-            f"{directory}"
-            )
-    valid_directories.append(normalized_directories)
+        if not Path(normalized_directorie).is_absolute():
+            raise ConfigError(
+                f"monitored_directories[{index}] must be an absolute path: "
+                f"{directory}"
+                )
+        valid_directories.append(normalized_directorie)
 
     return valid_directories
 
@@ -108,7 +109,11 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
         normalized_config["heartbeat_interval_seconds"] = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
 
     if "monitored_directories" not in normalized_config:
-        normalized_config["monitored_directories"] = DEFAULT_MONITORED_DIRECTORIES
+        normalized_config["monitored_directories"] = list(DEFAULT_MONITORED_DIRECTORIES)
+
+    normalized_config["monitored_directories"] = validate_monitored_directories(
+        normalized_config["monitored_directories"]
+        )    
 
     if "recursive_monitoring" not in normalized_config:
         normalized_config["recursive_monitoring"] = DEFAULT_RECURSIVE_MONITORING
@@ -117,7 +122,7 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     seen_directories = set()
 
     for directory in normalized_config["monitored_directories"]:
-        directory_key = directory.casefold()
+        directory_key = os.path.normcase(directory)
 
         if directory_key not in seen_directories:
             unique_directories.append(directory)
@@ -142,9 +147,7 @@ def load_config(config_path: Path = CONFIG_PATH) -> Dict[str, Any]:
         raise ConfigError(f"Could not read config file {config_path}: {error}") from error
 
     validate_config(config)
-
     normalized_config = normalize_config(config)
-
     validate_server_url(normalized_config["server_url"])
 
     return normalized_config
