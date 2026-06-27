@@ -133,3 +133,17 @@ def send_event(server_url: str, event_payload: Dict[str, Any]) -> Dict[str, Any]
     POST /api/events
     """
     return post_request(server_url, "/api/events", event_payload)
+
+def send_heartbeat(server_url: str, agent_id: str) -> Dict[str, Any]:
+    """
+    Trimite un heartbeat de la agent către serverul EDR.
+
+    Apelează:
+    POST /api/agents/{agent_id}/heartbeat
+    """
+    
+    return post_request(
+        server_url,
+        f"/api/agents/{agent_id}/heartbeat",
+        {"agent_id": agent_id}
+    )

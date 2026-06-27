@@ -12,6 +12,7 @@ from services.transport import (
     check_server_health,
     register_agent,
     send_event,
+    send_heartbeat,
 )
 
 
@@ -65,17 +66,6 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         "agent_id": config["agent_id"],
         "event_type": "agent_startup",
         "description": f"Agent started successfully at {current_time}",
-    }
-
-
-def build_heartbeat_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Construiește evenimentul periodic de heartbeat."""
-    current_time = datetime.now(timezone.utc).isoformat()
-
-    return {
-        "agent_id": config["agent_id"],
-        "event_type": "heartbeat",
-        "description": f"Agent heartbeat at {current_time}",
     }
 
 
@@ -219,9 +209,22 @@ def heartbeat_loop(
 
     while not stop_event.is_set():
         try:
-            heartbeat_payload = build_heartbeat_event_payload(config)
-            heartbeat_response = send_event(server_url, heartbeat_payload)
-            logger.info(f"Heartbeat sent successfully: {heartbeat_response}")
+            response = send_heartbeat(server_url, config["agent_id"])
+            logger.info(f"Heartbeat response: {response}")
+
+            directive = response.get("directive", {})
+            action = directive.get("action", "none")
+
+            if action == "reregister":
+                logger.warning(
+                    "Server requested re-registration of agent. Restarting startup loop..."
+                )
+                registered = startup_loop(config, server_url, collect_system_info(server_url), stop_event)
+                if not registered:
+                    logger.info("Re-registration aborted due to stop request.")
+                    break
+                elif action == "update_ruleset":
+                    logger.info("Server requested ruleset update. Implement update logic here.")
 
             backoff.record_success()
             stop_event.wait(timeout=heartbeat_interval_seconds)
