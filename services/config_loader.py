@@ -83,16 +83,16 @@ def validate_monitored_directories(directories: Any) -> List[str]:
         if not isinstance(directory, str) or not directory.strip():
             raise ConfigError(f"monitored_directories[{index}] must be a non-empty string")
         
-        normalized_directorie = os.path.normpath(
+        normalized_directory = os.path.normpath(
             os.path.expanduser(directory.strip())
         )
 
-        if not Path(normalized_directorie).is_absolute():
+        if not Path(normalized_directory).is_absolute():
             raise ConfigError(
                 f"monitored_directories[{index}] must be an absolute path: "
                 f"{directory}"
                 )
-        valid_directories.append(normalized_directorie)
+        valid_directories.append(normalized_directory)
 
     return valid_directories
 

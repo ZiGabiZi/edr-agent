@@ -14,7 +14,6 @@ DEFAULT_EVENT_DEBOUNCE_SECONDS = 2.0
 
 DEFAULT_MONITORED_EXTENSIONS: FrozenSet[str] = frozenset()
 
-_DEBOUNCE_CLEANUP_THRESHOLD = 500
 _DEBOUNCE_CLEANUP_INTERVAL_SECONDS = 60.0
 
 FileEventCallback = Callable[[Dict[str, str]], None]
@@ -92,7 +91,7 @@ class EventDebouncer:
 
     def is_duplicate(self, event_type: str, file_path: str) -> bool:
         """Returnează True dacă evenimentul a fost observat recent."""
-        event_key = f"{event_type}:{os.path.normcase(normalize_file_path(file_path))}"
+        event_key = os.path.normcase(normalize_file_path(file_path))
         current_time = time.monotonic()
 
         with self._lock:
