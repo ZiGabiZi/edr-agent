@@ -160,6 +160,7 @@ def send_heartbeat(
     """
     encoded_agent_id = quote(agent_id, safe="")
     payload = dict(heartbeat_payload) if heartbeat_payload else {}
+    payload["agent_id"] = agent_id
 
     return post_request(
         server_url,

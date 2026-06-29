@@ -325,8 +325,7 @@ def run_agent() -> None:
     finally:
         # Trimitem evenimentul de shutdown indiferent de cum s-a oprit agentul,
         # atât timp cât avem suficientă configurație și serverul poate fi accesibil.
-        has_min_config = config and config.get("agent_id") 
-        if has_min_config and server_url:
+        if config is not None and config.get("agent_id") and server_url is not None:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
                 shutdown_response = send_event(server_url, shutdown_payload)

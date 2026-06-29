@@ -173,23 +173,6 @@ class HeartbeatBackoffController:
       - La eșecuri repetate: delay crește exponențial până la max_delay
       - La recuperare: delay revine imediat la intervalul normal de heartbeat
       - Nicio cerință de coordonare între agenți: funcționează independent pe fiecare endpoint
-
-    Exemplu de utilizare în heartbeat_loop:
-
-        backoff = HeartbeatBackoffController(
-            agent_id=config["agent_id"],
-            base_delay=float(heartbeat_interval_seconds),
-        )
-
-        while True:
-            try:
-                send_event(server_url, payload)
-                backoff.record_success()
-                time.sleep(heartbeat_interval_seconds)
-            except TransportError as error:
-                logger.error("Heartbeat failed: %s", error)
-                delay = backoff.record_failure()
-                time.sleep(delay)
     """
 
     def __init__(
