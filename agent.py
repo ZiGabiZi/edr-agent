@@ -1,5 +1,6 @@
 import logging
 import signal
+import sys
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -8,6 +9,7 @@ from services.backoff import HeartbeatBackoffController
 from services.config_loader import ConfigError, load_config
 from services.system_info import collect_system_info
 from services.transport import (
+    FatalTransportError,
     TransportError,
     check_server_health,
     register_agent,
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 _STARTUP_BASE_DELAY_SECONDS: float = 5.0
 _STARTUP_MAX_DELAY_SECONDS: float = 60.0
+_STARTUP_MAX_RETRIES: int = 15
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +49,7 @@ def build_agent_registration_payload(
 ) -> Dict[str, Any]:
     """Construiește payload-ul trimis către server pentru înregistrarea agentului."""
     return {
-        "agent_id": config["agent_id"],
+        "agent_id": config.get("agent_id", "unknown_agent"),
         "hostname": system_info.get("hostname"),
         "operating_system": system_info.get("operating_system"),
         "ip_address": system_info.get("ip_address"),
@@ -63,7 +66,7 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     current_time = datetime.now(timezone.utc).isoformat()
     
     return {
-        "agent_id": config["agent_id"],
+        "agent_id": config.get("agent_id", "unknown_agent"),
         "event_type": "agent_startup",
         "description": f"Agent started successfully at {current_time}",
     }
@@ -74,7 +77,7 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     current_time = datetime.now(timezone.utc).isoformat()
 
     return {
-        "agent_id": config["agent_id"],
+        "agent_id": config.get("agent_id", "unknown_agent"),
         "event_type": "agent_shutdown",
         "description": f"Agent stopped manually at {current_time}",
     }
@@ -101,6 +104,7 @@ def startup_loop(
     server_url: str,
     system_info: Dict[str, Any],
     stop_event: threading.Event,
+    max_retries: int = _STARTUP_MAX_RETRIES,
 ) -> bool:
     """
     Încearcă repetat să contacteze serverul, să înregistreze agentul și să trimită
@@ -121,6 +125,7 @@ def startup_loop(
         system_info: Informațiile despre sistem colectate la pornire.
         stop_event: Eveniment de oprire — dacă este setat, funcția se oprește
                     imediat fără a mai reîncerca.
+        max_retries: Numărul maxim de încercări de înregistrare.
 
     Returns:
         True dacă înregistrarea a reușit complet.
@@ -155,12 +160,21 @@ def startup_loop(
 
             backoff.record_success()
             return True
+        
+        except FatalTransportError as error:
+            logger.critical(f"Permanent configuration or auth error detected: {error}")
+            logger.critical("Aborting startup loop. Manual intervention required.")
+            return False
 
         except TransportError as error:
             logger.error(f"Startup connection failed: {error}")
             delay = backoff.record_failure()
-            # wait() se trezește imediat dacă stop_event este setat —
-            # spre deosebire de time.sleep() care ar bloca pentru întreaga durată.
+            if backoff.consecutive_failures >= max_retries:
+                logger.critical(
+                    f"Agent failed to register after {max_retries} attempts. "
+                    "Possible misconfiguration. Aborting startup loop."
+                )
+                return False
             stop_event.wait(timeout=delay)
 
     logger.info("Startup loop exited: stop was requested before registration completed.")
@@ -174,6 +188,7 @@ def startup_loop(
 def heartbeat_loop(
     config: Dict[str, Any],
     server_url: str,
+    system_info: Dict[str, Any],
     heartbeat_interval_seconds: int,
     stop_event: threading.Event,
 ) -> None:
@@ -212,19 +227,21 @@ def heartbeat_loop(
             response = send_heartbeat(server_url, config["agent_id"])
             logger.info(f"Heartbeat response: {response}")
 
-            directive = response.get("directive", {})
+            directive = response.get("directive") or {}
             action = directive.get("action", "none")
 
             if action == "reregister":
                 logger.warning(
                     "Server requested re-registration of agent. Restarting startup loop..."
                 )
-                registered = startup_loop(config, server_url, collect_system_info(server_url), stop_event)
+                registered = startup_loop(config, server_url, system_info, stop_event)
+
                 if not registered:
                     logger.info("Re-registration aborted due to stop request.")
                     break
-                elif action == "update_ruleset":
-                    logger.info("Server requested ruleset update. Implement update logic here.")
+
+            elif action == "update_ruleset":
+                logger.info("Server requested ruleset update. Implement update logic here.")
 
             backoff.record_success()
             stop_event.wait(timeout=heartbeat_interval_seconds)
@@ -286,7 +303,14 @@ def run_agent() -> None:
         registered = startup_loop(config, server_url, system_info, stop_event)
 
         if registered:
-            heartbeat_loop(config, server_url, heartbeat_interval_seconds, stop_event)
+            heartbeat_loop(config, server_url, system_info, heartbeat_interval_seconds, stop_event)
+
+        elif not stop_event.is_set():
+            logger.critical(
+                "Agent failed to register after maximum retries. "
+                "Please check the configuration and server availability."
+            )    
+            sys.exit(1)
 
     except KeyboardInterrupt:
         logger.info("Agent stopped manually by user (Ctrl+C).")
@@ -301,13 +325,18 @@ def run_agent() -> None:
     finally:
         # Trimitem evenimentul de shutdown indiferent de cum s-a oprit agentul,
         # atât timp cât avem suficientă configurație și serverul poate fi accesibil.
-        if config is not None and server_url is not None:
+        has_min_config = config and config.get("agent_id") 
+        if has_min_config and server_url:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
                 shutdown_response = send_event(server_url, shutdown_payload)
                 logger.info(f"Shutdown event response: {shutdown_response}")
+
             except TransportError as error:
                 logger.error(f"Could not send shutdown event: {error}")
+
+            except Exception as e:
+                logger.exception(f"Failed to generate or send shutdown event due to internal error: {e}")
 
         logger.info("Agent stopped.")
 

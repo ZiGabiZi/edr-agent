@@ -91,7 +91,7 @@ class EventDebouncer:
 
     def is_duplicate(self, event_type: str, file_path: str) -> bool:
         """Returnează True dacă evenimentul a fost observat recent."""
-        event_key = os.path.normcase(normalize_file_path(file_path))
+        event_key = f"{event_type}:{os.path.normcase(normalize_file_path(file_path))}"
         current_time = time.monotonic()
 
         with self._lock:

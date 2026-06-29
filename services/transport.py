@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 import requests
 from requests import Response, Session
@@ -10,6 +11,13 @@ DEFAULT_TIMEOUT_SECONDS = 5
 
 class TransportError(Exception):
     """Eroare ridicată atunci când comunicarea cu serverul EDR eșuează."""
+    pass
+
+class FatalTransportError(TransportError):
+    """
+    Eroare irecuperabilă (ex: 401 Unauthorized, 403 Forbidden, 409 Conflict).
+    Agentul trebuie să se oprească imediat, deoarece continuarea ar fi inutilă.
+    """
     pass
 
 
@@ -51,6 +59,11 @@ def handle_response(response: Response) -> Dict[str, Any]:
         except ValueError:
             error_detail = response.text
 
+        if 400 <= response.status_code < 500 and response.status_code not in (408, 429):
+            raise FatalTransportError(
+                f"Fatal HTTP error {response.status_code}: {error_detail}"
+            ) from error
+        
         raise TransportError(
             f"HTTP error {response.status_code}: {error_detail}"
         ) from error
@@ -134,16 +147,22 @@ def send_event(server_url: str, event_payload: Dict[str, Any]) -> Dict[str, Any]
     """
     return post_request(server_url, "/api/events", event_payload)
 
-def send_heartbeat(server_url: str, agent_id: str) -> Dict[str, Any]:
+def send_heartbeat(
+        server_url: str,
+        agent_id: str,
+        heartbeat_payload: Optional[Dict[str, Any]] = None
+        ) -> Dict[str, Any]:
     """
     Trimite un heartbeat de la agent către serverul EDR.
 
     Apelează:
     POST /api/agents/{agent_id}/heartbeat
     """
-    
+    encoded_agent_id = quote(agent_id, safe="")
+    payload = dict(heartbeat_payload) if heartbeat_payload else {}
+
     return post_request(
         server_url,
-        f"/api/agents/{agent_id}/heartbeat",
-        {"agent_id": agent_id}
+        f"/api/agents/{encoded_agent_id}/heartbeat",
+        payload
     )

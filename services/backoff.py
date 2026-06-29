@@ -41,7 +41,7 @@ Soluția implementată — Jitter Hibrid Agent-Ancorat:
         Eșec 3 → W_base =  40s → W_final ≈  40s–48s
         Eșec 4 → W_base =  80s → W_final ≈  80s–96s
         Eșec 5 → W_base = 160s → W_final ≈ 160s–192s
-        Eșec 6 → W_base = 300s → W_final ≈ 300s–360s  (plafon atins)
+        Eșec 6 → W_base = 250s → W_final ≈ 250s–300s  (plafon atins)
 
 Relevanță pentru medii air-gapped:
     Într-o rețea izolată, nu există o componentă centrală care să coordoneze
@@ -99,7 +99,7 @@ def _compute_agent_phase(agent_id: str, jitter_ratio: float) -> float:
 
 def compute_backoff_delay(
     consecutive_failures: int,
-    agent_id: str,
+    agent_phase: float,
     base_delay: float = DEFAULT_BASE_DELAY_SECONDS,
     max_delay: float = DEFAULT_MAX_DELAY_SECONDS,
     multiplier: float = DEFAULT_MULTIPLIER,
@@ -116,7 +116,7 @@ def compute_backoff_delay(
                               La 1 → delay = base_delay × 2
                               La 2 → delay = base_delay × 4
                               etc.
-        agent_id: ID-ul agentului, utilizat pentru componenta deterministă.
+        agent_phase: Faza de jitter deterministă, calculată pentru agent.
         base_delay: Delay-ul de pornire în secunde (tipic = heartbeat_interval_seconds).
         max_delay: Plafonul maxim al delay-ului, indiferent de numărul de eșecuri.
         multiplier: Factorul de creștere exponențială.
@@ -127,10 +127,10 @@ def compute_backoff_delay(
     """
     # Pasul 1: Backoff exponențial, plafonat la max_delay
     raw_delay = base_delay * (multiplier ** consecutive_failures)
-    capped_delay = min(max_delay, raw_delay)
+    adjusted_max_delay = max_delay / (1.0 + jitter_ratio)
+    capped_delay = min(adjusted_max_delay, raw_delay)
 
     # Pasul 2: Jitter hibrid (determinist + aleatoriu)
-    agent_phase = _compute_agent_phase(agent_id, jitter_ratio)
     random_component = random.uniform(0.0, jitter_ratio / 2.0)
     total_jitter = agent_phase + random_component
 
@@ -208,6 +208,7 @@ class HeartbeatBackoffController:
         self.jitter_ratio = jitter_ratio
         self.logger = logger or logging.getLogger(__name__)
         self._state = BackoffState()
+        self._agent_phase = _compute_agent_phase(agent_id, jitter_ratio)
 
     # ------------------------------------------------------------------
     # API public
@@ -248,7 +249,7 @@ class HeartbeatBackoffController:
         # astfel încât delay-ul inițial este exact base_delay (fără penalizare).
         delay = compute_backoff_delay(
             consecutive_failures=self._state.consecutive_failures - 1,
-            agent_id=self.agent_id,
+            agent_phase=self._agent_phase,
             base_delay=self.base_delay,
             max_delay=self.max_delay,
             multiplier=self.multiplier,
