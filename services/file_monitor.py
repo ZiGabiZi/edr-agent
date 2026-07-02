@@ -161,12 +161,12 @@ class EDRFileEventHandler(FileSystemEventHandler):
     def on_created(self, event: FileSystemEvent) -> None:
         """Procesează apariția unui fișier nou."""
         if not event.is_directory:
-            self._handle_file_event(event.src_path, "file_created")
+            self._handle_file_event(os.fsdecode(event.src_path), "file_created")
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Procesează modificarea unui fișier existent."""
         if not event.is_directory:
-            self._handle_file_event(event.src_path, "file_modified")
+            self._handle_file_event(os.fsdecode(event.src_path), "file_modified")
 
     def on_moved(self, event: FileSystemEvent) -> None:
         """
@@ -178,8 +178,9 @@ class EDRFileEventHandler(FileSystemEventHandler):
         if not isinstance(event, FileMovedEvent) or event.is_directory:
             return
         
-        if self._is_in_monitored_directory(event.dest_path):
-            self._handle_file_event(event.dest_path, "file_created")
+        dest_path = os.fsdecode(event.dest_path)
+        if self._is_in_monitored_directory(dest_path):
+            self._handle_file_event(dest_path, "file_created")
 
     def _handle_file_event(
         self,

@@ -3,8 +3,9 @@ import signal
 import sys
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Callable, Optional
 
+from services.file_monitor import FileMonitor, FileMonitorError
 from services.backoff import HeartbeatBackoffController
 from services.config_loader import ConfigError, load_config
 from services.system_info import collect_system_info
@@ -81,6 +82,23 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         "event_type": "agent_shutdown",
         "description": f"Agent stopped manually at {current_time}",
     }
+
+def build_file_event_callback(
+    server_url: str,
+) -> Callable[[Dict[str, Any]], None]:
+    """
+    Construiește callback-ul apelat de FileMonitor pentru fiecare eveniment de fișier.
+
+    Callback-ul este invocat pe thread-ul observer-ului watchdog, nu pe main thread.
+    Nu prindem aici excepțiile de transport: EDRFileEventHandler le tratează deja și
+    loghează un warning, astfel încât o eroare temporară de rețea la trimiterea unui
+    eveniment să nu oprească monitorizarea.
+    """
+    def file_event_callback(event_payload: Dict[str, Any]) -> None:
+        response = send_event(server_url, event_payload)
+        logger.info(f"File event response: {response}")
+
+    return file_event_callback
 
 
 def log_system_info(system_info: Dict[str, Any]) -> None:
@@ -251,6 +269,37 @@ def heartbeat_loop(
             delay = backoff.record_failure()
             stop_event.wait(timeout=delay)
 
+def start_file_monitoring(
+    config: Dict[str, Any],
+    server_url: str,
+) -> Optional[FileMonitor]:
+    """
+    Instanțiază și pornește FileMonitor pe baza configurației agentului.
+
+    Dacă niciun director configurat nu este valid, monitorizarea nu poate porni,
+    dar agentul continuă să funcționeze (heartbeat + evenimente de ciclu de viață).
+    Returnează instanța pornită sau None dacă monitorizarea nu a putut porni.
+    """
+    monitor = FileMonitor(
+        agent_id=config["agent_id"],
+        monitored_directories=config["monitored_directories"],
+        recursive_monitoring=config["recursive_monitoring"],
+        event_callback=build_file_event_callback(server_url),
+        logger=logger,
+    )
+
+    try:
+        monitor.start()
+        return monitor
+    except FileMonitorError as error:
+        logger.error(
+            "File monitoring could not start: %s. "
+            "Agent continues with heartbeat only.",
+            error,
+        )
+        return None
+
+
 
 # ---------------------------------------------------------------------------
 # Orchestratorul principal
@@ -276,6 +325,7 @@ def run_agent() -> None:
     """
     config = None
     server_url = None
+    file_monitor = None
 
     stop_event = threading.Event()
 
@@ -303,6 +353,7 @@ def run_agent() -> None:
         registered = startup_loop(config, server_url, system_info, stop_event)
 
         if registered:
+            file_monitor = start_file_monitoring(config, server_url)
             heartbeat_loop(config, server_url, system_info, heartbeat_interval_seconds, stop_event)
 
         elif not stop_event.is_set():
@@ -325,6 +376,9 @@ def run_agent() -> None:
     finally:
         # Trimitem evenimentul de shutdown indiferent de cum s-a oprit agentul,
         # atât timp cât avem suficientă configurație și serverul poate fi accesibil.
+        if file_monitor is not None and file_monitor.is_running():
+            file_monitor.stop()
+            file_monitor.join(timeout=5)
         if config is not None and config.get("agent_id") and server_url is not None:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
