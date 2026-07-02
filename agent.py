@@ -331,6 +331,7 @@ def run_agent() -> None:
     config = None
     server_url = None
     file_monitor = None
+    registered = False
 
     stop_event = threading.Event()
 
@@ -361,12 +362,6 @@ def run_agent() -> None:
             file_monitor = start_file_monitoring(config, server_url)
             heartbeat_loop(config, server_url, system_info, heartbeat_interval_seconds, stop_event)
 
-        elif not stop_event.is_set():
-            logger.critical(
-                "Agent failed to register after maximum retries. "
-                "Please check the configuration and server availability."
-            )    
-            sys.exit(1)
 
     except KeyboardInterrupt:
         logger.info("Agent stopped manually by user (Ctrl+C).")
@@ -384,7 +379,7 @@ def run_agent() -> None:
         if file_monitor is not None and file_monitor.is_running():
             file_monitor.stop()
             file_monitor.join(timeout=5)
-        if config is not None and config.get("agent_id") and server_url is not None:
+        if config and registered and config.get("agent_id") and server_url is not None:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
                 shutdown_response = send_event(server_url, shutdown_payload)
