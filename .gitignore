@@ -2,5 +2,5 @@
 *.log
 logs/
 __pycache__
-.vscode
-.claude
+.vscode/
+.claude/

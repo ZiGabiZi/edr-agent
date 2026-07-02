@@ -264,6 +264,11 @@ def heartbeat_loop(
             backoff.record_success()
             stop_event.wait(timeout=heartbeat_interval_seconds)
 
+        except FatalTransportError as error:
+            logger.critical(f"Permanent configuration or auth error detected: {error}")
+            logger.critical("Aborting heartbeat loop. Manual intervention required.")
+            return
+
         except TransportError as error:
             logger.error(f"Heartbeat transport error: {error}")
             delay = backoff.record_failure()
