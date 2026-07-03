@@ -1,8 +1,8 @@
 import logging
 import signal
-import sys
 import threading
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Callable, Optional
 
 from services.file_monitor import FileMonitor, FileMonitorError
@@ -19,11 +19,19 @@ from services.transport import (
 )
 
 
+_LOG_FILE_MAX_BYTES: int = 10 * 1024 * 1024
+_LOG_FILE_BACKUP_COUNT: int = 5
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - [%(levelname)s] - %(message)s",
     handlers=[
-        logging.FileHandler("agent.log", encoding="utf-8"),
+        RotatingFileHandler(
+            "agent.log",
+            maxBytes=_LOG_FILE_MAX_BYTES,
+            backupCount=_LOG_FILE_BACKUP_COUNT,
+            encoding="utf-8",
+        ),
         logging.StreamHandler(),
     ],
 )
@@ -220,13 +228,17 @@ def heartbeat_loop(
         oprire chiar și în mijlocul unui delay de 300 de secunde.
 
     Comportament în stare normală:
-        Agentul trimite un heartbeat la fiecare heartbeat_interval_seconds.
-        La succes, intervalul rămâne constant.
+        Agentul trimite un heartbeat la fiecare heartbeat_interval_seconds
+        (valoarea locală implicită, folosită doar până la primul răspuns).
+        La succes, dacă serverul indică next_heartbeat_seconds în răspuns,
+        acea valoare înlocuiește intervalul curent — serverul dictează astfel
+        cadența întregului parc de agenți dintr-un singur loc. Dacă serverul
+        nu trimite o valoare validă, agentul păstrează ultimul interval cunoscut.
 
     Comportament la eșec (server indisponibil):
-        Eșec 1 → delay ≈ heartbeat_interval × 1  (ex: ~10s)
-        Eșec 2 → delay ≈ heartbeat_interval × 2  (ex: ~20s)
-        Eșec 3 → delay ≈ heartbeat_interval × 4  (ex: ~40s)
+        Eșec 1 → delay ≈ interval curent × 1  (ex: ~10s)
+        Eșec 2 → delay ≈ interval curent × 2  (ex: ~20s)
+        Eșec 3 → delay ≈ interval curent × 4  (ex: ~40s)
         ...până la plafonul maxim de 300 de secunde.
         La recuperarea conexiunii, intervalul revine imediat la valoarea normală.
     """
@@ -234,9 +246,11 @@ def heartbeat_loop(
         f"Starting heartbeat loop with interval={heartbeat_interval_seconds} seconds."
     )
 
+    current_interval = heartbeat_interval_seconds
+
     backoff = HeartbeatBackoffController(
         agent_id=config["agent_id"],
-        base_delay=float(heartbeat_interval_seconds),
+        base_delay=float(current_interval),
         logger=logger,
     )
 
@@ -261,8 +275,17 @@ def heartbeat_loop(
             elif action == "update_ruleset":
                 logger.info("Server requested ruleset update. Implement update logic here.")
 
+            next_interval = response.get("next_heartbeat_seconds")
+            if isinstance(next_interval, (int, float)) and next_interval > 0:
+                if next_interval != current_interval:
+                    logger.info(
+                        f"Server adjusted heartbeat cadence: {current_interval}s -> {next_interval}s."
+                    )
+                current_interval = next_interval
+                backoff.base_delay = float(current_interval)
+
             backoff.record_success()
-            stop_event.wait(timeout=heartbeat_interval_seconds)
+            stop_event.wait(timeout=current_interval)
 
         except FatalTransportError as error:
             logger.critical(f"Permanent configuration or auth error detected: {error}")
