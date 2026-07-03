@@ -248,6 +248,13 @@ def heartbeat_loop(
 
     current_interval = heartbeat_interval_seconds
 
+    # Contor de secvență per proces: pornește de la 1 la fiecare lansare a agentului
+    # și crește monoton cu fiecare încercare de heartbeat. Serverul îl folosește ca
+    # semnal de continuitate — un gol înseamnă heartbeat-uri pierdute, iar resetarea
+    # la o valoare mai mică decât ultima cunoscută înseamnă că procesul agentului a
+    # repornit (crash, kill, tampering) chiar dacă nu a apucat un shutdown controlat.
+    heartbeat_sequence = 0
+
     backoff = HeartbeatBackoffController(
         agent_id=config["agent_id"],
         base_delay=float(current_interval),
@@ -256,7 +263,12 @@ def heartbeat_loop(
 
     while not stop_event.is_set():
         try:
-            response = send_heartbeat(server_url, config["agent_id"])
+            heartbeat_sequence += 1
+            heartbeat_payload = {
+                "sequence": heartbeat_sequence,
+                "agent_version": config.get("agent_version"),
+            }
+            response = send_heartbeat(server_url, config["agent_id"], heartbeat_payload)
             logger.info(f"Heartbeat response: {response}")
 
             directive = response.get("directive") or {}
