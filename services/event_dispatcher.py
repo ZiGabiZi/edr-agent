@@ -27,6 +27,7 @@ Politica de erori — cheia întregii corecturi:
         bloca la nesfârșit restul cozii (problema clasică "poison message").
 """
 
+from asyncio import timeout
 import logging
 import threading
 from typing import Optional
@@ -157,7 +158,7 @@ class EventDispatcher(threading.Thread):
                     error,
                 )
                 self.spool.record_attempt(row_id)
-                self._wait(self._backoff.record_failure())
+                self._sleep_backoff(self._backoff.record_failure())
                 break
 
             except FatalTransportError as error:
@@ -177,7 +178,7 @@ class EventDispatcher(threading.Thread):
                     error,
                 )
                 self.spool.record_attempt(row_id)
-                self._wait(self._backoff.record_failure())
+                self._sleep_backoff(self._backoff.record_failure())
                 break
 
         return sent_count
@@ -186,6 +187,18 @@ class EventDispatcher(threading.Thread):
         """Așteaptă, dar se trezește imediat la wake() sau stop()."""
         self._wakeup.wait(timeout=timeout)
         self._wakeup.clear()
+
+    def _sleep_backoff(self, timeout: float) -> None:
+        """
+        Așteaptă backoff-ul după un eșec de transport.
+
+        Spre deosebire de _wait(), NU este întreruptă de wake(): un eveniment de
+        fișier nou nu schimbă faptul că serverul e indisponibil, deci nu trebuie
+        să scurteze backoff-ul — altfel s-ar anula tocmai protecția anti-retry-storm.
+        Rămâne responsivă doar la oprire, prin stop_event (setat în finally înainte
+        de dispatcher.stop()).
+        """
+        self.stop_event.wait(timeout=timeout)
 
     def _safe_pending_count(self) -> int:
         try:
