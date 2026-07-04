@@ -5,11 +5,14 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Callable, Optional
 
+from services.event_dispatcher import EventDispatcher
+from services.event_spool import EventSpool, EventSpoolError
 from services.file_monitor import FileMonitor, FileMonitorError
 from services.backoff import HeartbeatBackoffController
 from services.config_loader import ConfigError, load_config
 from services.system_info import collect_system_info
 from services.transport import (
+    AgentNotRegisteredError,
     FatalTransportError,
     TransportError,
     check_server_health,
@@ -92,19 +95,23 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def build_file_event_callback(
-    server_url: str,
+    spool: EventSpool,
+    dispatcher: EventDispatcher,
 ) -> Callable[[Dict[str, Any]], None]:
     """
     Construiește callback-ul apelat de FileMonitor pentru fiecare eveniment de fișier.
 
-    Callback-ul este invocat pe thread-ul observer-ului watchdog, nu pe main thread.
-    Nu prindem aici excepțiile de transport: EDRFileEventHandler le tratează deja și
-    loghează un warning, astfel încât o eroare temporară de rețea la trimiterea unui
-    eveniment să nu oprească monitorizarea.
+    Callback-ul NU mai trimite pe rețea de pe thread-ul observer-ului watchdog:
+    doar persistă evenimentul în coada locală și trezește dispatcher-ul.
+    Consecințe:
+      - un server picat sau un agent neînregistrat nu mai pierde evenimente —
+        ele așteaptă pe disc până când livrarea redevine posibilă;
+      - thread-ul observer-ului nu mai este blocat de timeout-uri HTTP (până
+        la 5s per eveniment în implementarea anterioară).
     """
     def file_event_callback(event_payload: Dict[str, Any]) -> None:
-        response = send_event(server_url, event_payload)
-        logger.info(f"File event response: {response}")
+        spool.enqueue(event_payload)
+        dispatcher.wake()
 
     return file_event_callback
 
@@ -303,6 +310,16 @@ def heartbeat_loop(
             logger.critical(f"Permanent configuration or auth error detected: {error}")
             logger.critical("Aborting heartbeat loop. Manual intervention required.")
             return
+        
+        except AgentNotRegisteredError as error:
+            logger.warning(
+                "Server no longer recognizes this agent (%s). Re-registering...",
+                error,
+            )
+            registered = startup_loop(config, server_url, system_info, stop_event)
+            if not registered:
+                logger.info("Re-registration failed or was aborted. Stopping heartbeat loop.")
+                return
 
         except TransportError as error:
             logger.error(f"Heartbeat transport error: {error}")
@@ -311,7 +328,7 @@ def heartbeat_loop(
 
 def start_file_monitoring(
     config: Dict[str, Any],
-    server_url: str,
+    event_callback: Callable[[Dict[str, Any]], None],
 ) -> Optional[FileMonitor]:
     """
     Instanțiază și pornește FileMonitor pe baza configurației agentului.
@@ -324,7 +341,7 @@ def start_file_monitoring(
         agent_id=config["agent_id"],
         monitored_directories=config["monitored_directories"],
         recursive_monitoring=config["recursive_monitoring"],
-        event_callback=build_file_event_callback(server_url),
+        event_callback=event_callback,
         logger=logger,
     )
 
@@ -366,6 +383,8 @@ def run_agent() -> None:
     config = None
     server_url = None
     file_monitor = None
+    event_spool = None
+    event_dispatcher = None
     registered = False
 
     stop_event = threading.Event()
@@ -394,7 +413,30 @@ def run_agent() -> None:
         registered = startup_loop(config, server_url, system_info, stop_event)
 
         if registered:
-            file_monitor = start_file_monitoring(config, server_url)
+            try:
+                event_spool = EventSpool(logger=logger)
+            except EventSpoolError as error:
+                logger.error(
+                    "Event spool could not be opened: %s. "
+                    "File monitoring disabled; agent continues with heartbeat only.",
+                    error,
+                )
+
+            if event_spool is not None:
+                event_dispatcher = EventDispatcher(
+                    spool=event_spool,
+                    server_url=server_url,
+                    agent_id=config["agent_id"],
+                    stop_event=stop_event,
+                    logger=logger,
+                )
+                event_dispatcher.start()
+
+                file_monitor = start_file_monitoring(
+                    config,
+                    build_file_event_callback(event_spool, event_dispatcher),
+                )
+
             heartbeat_loop(config, server_url, system_info, heartbeat_interval_seconds, stop_event)
 
 
@@ -409,11 +451,20 @@ def run_agent() -> None:
         logger.exception("Unexpected error occurred:")
 
     finally:
+        stop_event.set()
         # Trimitem evenimentul de shutdown indiferent de cum s-a oprit agentul,
         # atât timp cât avem suficientă configurație și serverul poate fi accesibil.
         if file_monitor is not None and file_monitor.is_running():
             file_monitor.stop()
             file_monitor.join(timeout=5)
+
+        if event_dispatcher is not None:
+            event_dispatcher.stop()
+            event_dispatcher.join(timeout=5)
+
+        if event_spool is not None:
+            event_spool.close()
+            
         if config and registered and config.get("agent_id") and server_url is not None:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
