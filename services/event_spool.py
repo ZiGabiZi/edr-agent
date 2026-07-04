@@ -38,7 +38,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-DEFAULT_SPOOL_PATH = Path("event_spool.db")
+_BASE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_SPOOL_PATH = _BASE_DIR / "event_spool.db"
 DEFAULT_MAX_SPOOLED_EVENTS = 10_000
 
 

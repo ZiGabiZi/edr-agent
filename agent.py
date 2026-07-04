@@ -320,6 +320,10 @@ def heartbeat_loop(
             if not registered:
                 logger.info("Re-registration failed or was aborted. Stopping heartbeat loop.")
                 return
+            
+            delay = backoff.record_failure()
+            logger.info("Waiting %.1fs before next heartbeat after re-registration.", delay)
+            stop_event.wait(timeout=delay)
 
         except TransportError as error:
             logger.error(f"Heartbeat transport error: {error}")
