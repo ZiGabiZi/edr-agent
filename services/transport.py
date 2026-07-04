@@ -19,6 +19,17 @@ class FatalTransportError(TransportError):
     Agentul trebuie să se oprească imediat, deoarece continuarea ar fi inutilă.
     """
     pass
+class AgentNotRegisteredError(TransportError):
+    """
+    Serverul nu recunoaște agentul (HTTP 404 — agent inexistent în store,
+    tipic după un restart al serverului cu store volatil).
+
+    Spre deosebire de FatalTransportError, această stare este RECUPERABILĂ
+    automat: bucla de heartbeat va re-înregistra agentul, după care
+    trimiterea evenimentelor poate fi reluată. Nu justifică oprirea
+    agentului și nici abandonarea evenimentelor.
+    """
+    pass
 
 
 def build_url(server_url: str, endpoint: str) -> str:
@@ -58,6 +69,11 @@ def handle_response(response: Response) -> Dict[str, Any]:
             error_detail = response.json()
         except ValueError:
             error_detail = response.text
+
+        if response.status_code == 404:
+            raise AgentNotRegisteredError(
+                f"Agent not recognized by server (HTTP 404): {error_detail}"
+            ) from error
 
         if 400 <= response.status_code < 500 and response.status_code not in (408, 429):
             raise FatalTransportError(
