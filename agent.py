@@ -137,7 +137,7 @@ def startup_loop(
     server_url: str,
     system_info: Dict[str, Any],
     stop_event: threading.Event,
-    max_retries: int = _STARTUP_MAX_RETRIES,
+    warn_after_retries: int = _STARTUP_MAX_RETRIES,
 ) -> bool:
     """
     Încearcă repetat să contacteze serverul, să înregistreze agentul și să trimită
@@ -158,7 +158,7 @@ def startup_loop(
         system_info: Informațiile despre sistem colectate la pornire.
         stop_event: Eveniment de oprire — dacă este setat, funcția se oprește
                     imediat fără a mai reîncerca.
-        max_retries: Numărul maxim de încercări de înregistrare.
+        warn_after_retries: Numărul maxim de încercări de înregistrare.
 
     Returns:
         True dacă înregistrarea a reușit complet.
@@ -187,10 +187,6 @@ def startup_loop(
             register_response = register_agent(server_url, agent_payload)
             logger.info(f"Register response: {register_response}")
 
-            startup_payload = build_startup_event_payload(config)
-            startup_response = send_event(server_url, startup_payload)
-            logger.info(f"Startup event response: {startup_response}")
-
             backoff.record_success()
             return True
         
@@ -202,10 +198,10 @@ def startup_loop(
         except TransportError as error:
             logger.error(f"Startup connection failed: {error}")
             delay = backoff.record_failure()
-            if backoff.consecutive_failures >= max_retries:
-                logger.critical(
-                    f"Agent failed to register after {max_retries} attempts. "
-                    "Possible misconfiguration. Aborting startup loop."
+            if backoff.consecutive_failures == warn_after_retries:
+                logger.warning(
+                    f"Agent failed to register after {warn_after_retries} attempts. "
+                    "Possible misconfiguration. Continuing startup loop."
                 )
                 return False
             stop_event.wait(timeout=delay)
@@ -414,34 +410,41 @@ def run_agent() -> None:
         system_info = collect_system_info(server_url)
         log_system_info(system_info)
 
+        try:
+            event_spool = EventSpool(logger=logger)
+        except EventSpoolError as error:
+            logger.error(
+                "Event spool could not be opened: %s. "
+                "File monitoring disabled; agent continues with heartbeat only.",
+                error,
+            )
+
+        if event_spool is not None:
+            event_dispatcher = EventDispatcher(
+                spool=event_spool,
+                server_url=server_url,
+                agent_id=config["agent_id"],
+                stop_event=stop_event,
+                logger=logger,
+            )
+            event_spool.enqueue(build_startup_event_payload(config))
+            event_dispatcher.start()
+
+            file_monitor = start_file_monitoring(
+                config,
+                build_file_event_callback(event_spool, event_dispatcher),
+            )
         registered = startup_loop(config, server_url, system_info, stop_event)
 
         if registered:
-            try:
-                event_spool = EventSpool(logger=logger)
-            except EventSpoolError as error:
-                logger.error(
-                    "Event spool could not be opened: %s. "
-                    "File monitoring disabled; agent continues with heartbeat only.",
-                    error,
-                )
+            heartbeat_loop(
+                config,
+                server_url,
+                system_info,
+                heartbeat_interval_seconds,
+                stop_event,
+            )
 
-            if event_spool is not None:
-                event_dispatcher = EventDispatcher(
-                    spool=event_spool,
-                    server_url=server_url,
-                    agent_id=config["agent_id"],
-                    stop_event=stop_event,
-                    logger=logger,
-                )
-                event_dispatcher.start()
-
-                file_monitor = start_file_monitoring(
-                    config,
-                    build_file_event_callback(event_spool, event_dispatcher),
-                )
-
-            heartbeat_loop(config, server_url, system_info, heartbeat_interval_seconds, stop_event)
 
 
     except KeyboardInterrupt:

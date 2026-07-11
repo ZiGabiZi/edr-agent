@@ -1,12 +1,13 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 
 REQUIRED_CONFIG_KEYS = ["agent_id", "server_url", "agent_version"]
-CONFIG_PATH = Path("config.json")
+_BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_PATH = _BASE_DIR / "config.json"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10
 DEFAULT_MONITORED_DIRECTORIES = [r"C:\EDR_Test"]
 DEFAULT_RECURSIVE_MONITORING = True
@@ -133,8 +134,10 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return normalized_config
 
 
-def load_config(config_path: Path = CONFIG_PATH) -> Dict[str, Any]:
+def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """Citește, validează și normalizează configurația agentului."""
+    config_path = Path(config_path) if config_path is not None else CONFIG_PATH
+    
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
 
