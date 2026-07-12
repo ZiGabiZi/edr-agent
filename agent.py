@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Callable, Optional
 from uuid import uuid4
+from pathlib import Path
 
 from services.event_dispatcher import EventDispatcher
 from services.event_spool import EventSpool, EventSpoolError
@@ -22,7 +23,8 @@ from services.transport import (
     send_heartbeat,
 )
 
-
+_BASE_DIR = Path(__file__).resolve().parent
+_LOG_FILE_PATH = _BASE_DIR / "agent.log"
 _LOG_FILE_MAX_BYTES: int = 10 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT: int = 5
 
@@ -31,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s",
     handlers=[
         RotatingFileHandler(
-            "agent.log",
+            _LOG_FILE_PATH,
             maxBytes=_LOG_FILE_MAX_BYTES,
             backupCount=_LOG_FILE_BACKUP_COUNT,
             encoding="utf-8",
