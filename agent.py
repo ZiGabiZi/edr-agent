@@ -82,6 +82,7 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
         "event_type": "agent_startup",
+        "occurred_at": current_time,
         "description": f"Agent started successfully at {current_time}",
     }
 
@@ -135,7 +136,7 @@ def log_system_info(system_info: Dict[str, Any]) -> None:
 # Faza de startup — rezistentă la serverul picat la pornirea agentului
 # ---------------------------------------------------------------------------
 
-def startup_loop(
+def register_agent_with_retry(
     config: Dict[str, Any],
     server_url: str,
     system_info: Dict[str, Any],
@@ -143,12 +144,13 @@ def startup_loop(
     warn_after_retries: int = _STARTUP_MAX_RETRIES,
 ) -> bool:
     """
-    Încearcă repetat să contacteze serverul, să înregistreze agentul și să trimită
-    evenimentul de startup, folosind exponential backoff cu jitter hibrid.
+    Încearcă repetat să contacteze serverul și să înregistreze agentul,
+    folosind exponential backoff cu jitter hibrid.
 
-    Această funcție rezolvă scenariul în care agentul pornește înainte ca serverul
-    EDR să fie disponibil — situație frecventă la repornirea infrastructurii sau
-    la pornirea automată a agentului ca serviciu de sistem.
+    NU emite evenimentul agent_startup: acela este construit și pus în coada
+    persistentă o singură dată per proces, în run_agent(). Funcția poate fi
+    astfel apelată în siguranță și la reînregistrare (directiva 'reregister'
+    sau HTTP 404 la heartbeat), fără a genera evenimente false de pornire.
 
     Parametrii de backoff pentru startup sunt deliberat mai agresivi decât cei
     din heartbeat_loop (bază 5s, plafon 60s vs. bază=interval, plafon=300s),
@@ -284,7 +286,7 @@ def heartbeat_loop(
                 logger.warning(
                     "Server requested re-registration of agent. Restarting startup loop..."
                 )
-                registered = startup_loop(config, server_url, system_info, stop_event)
+                registered = register_agent_with_retry(config, server_url, system_info, stop_event)
 
                 if not registered:
                     logger.info("Re-registration aborted due to stop request.")
@@ -315,7 +317,7 @@ def heartbeat_loop(
                 "Server no longer recognizes this agent (%s). Re-registering...",
                 error,
             )
-            registered = startup_loop(config, server_url, system_info, stop_event)
+            registered = register_agent_with_retry(config, server_url, system_info, stop_event)
             if not registered:
                 logger.info("Re-registration failed or was aborted. Stopping heartbeat loop.")
                 return
@@ -422,6 +424,8 @@ def run_agent() -> None:
                 error,
             )
 
+        startup_event_payload = build_startup_event_payload(config)
+
         if event_spool is not None:
             event_dispatcher = EventDispatcher(
                 spool=event_spool,
@@ -430,16 +434,22 @@ def run_agent() -> None:
                 stop_event=stop_event,
                 logger=logger,
             )
-            event_spool.enqueue(build_startup_event_payload(config))
+            event_spool.enqueue(startup_event_payload)
             event_dispatcher.start()
-
             file_monitor = start_file_monitoring(
                 config,
                 build_file_event_callback(event_spool, event_dispatcher),
             )
-        registered = startup_loop(config, server_url, system_info, stop_event)
+
+        registered = register_agent_with_retry(config, server_url, system_info, stop_event)
 
         if registered:
+            if event_spool is None:
+                try:
+                    send_event(server_url, startup_event_payload)
+                except TransportError as error:
+                    logger.error(f"Could not send startup event directly: {error}")
+
             heartbeat_loop(
                 config,
                 server_url,
