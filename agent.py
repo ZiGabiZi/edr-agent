@@ -65,6 +65,7 @@ def build_agent_registration_payload(
     """Construiește payload-ul trimis către server pentru înregistrarea agentului."""
     return {
         "agent_id": config.get("agent_id", "unknown_agent"),
+        "agent_instance_id": config.get("agent_instance_id",),
         "hostname": system_info.get("hostname"),
         "operating_system": system_info.get("operating_system"),
         "ip_address": system_info.get("ip_address"),
@@ -83,6 +84,7 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
+        "agent_instance_id": config.get("agent_instance_id"),
         "event_type": "agent_startup",
         "occurred_at": current_time,
         "description": f"Agent started successfully at {current_time}",
@@ -275,6 +277,7 @@ def heartbeat_loop(
         try:
             heartbeat_sequence += 1
             heartbeat_payload = {
+                "agents_instance_id": config.get("agent_instance_id"),
                 "sequence": heartbeat_sequence,
                 "agent_version": config.get("agent_version"),
             }
@@ -407,6 +410,9 @@ def run_agent() -> None:
 
     try:
         config = load_config()
+        config["agent_instance_id"] = str(uuid4())
+        logger.info("Agent instance id (this run): %s", config["agent_instance_id"])
+
         server_url = config["server_url"]
         heartbeat_interval_seconds = config["heartbeat_interval_seconds"]
 
