@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Callable, Dict, FrozenSet, Iterable, Optional
+from uuid import uuid4
 
 from watchdog.events import FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -50,6 +51,7 @@ def build_file_event_payload(
     description = descriptions.get(event_type, "File system event detected")
 
     return {
+        "client_event_id": str(uuid4()),
         "agent_id": agent_id,
         "event_type": event_type,
         "file_path": normalized_path,

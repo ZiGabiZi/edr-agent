@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Callable, Optional
+from uuid import uuid4
 
 from services.event_dispatcher import EventDispatcher
 from services.event_spool import EventSpool, EventSpoolError
@@ -78,6 +79,7 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     current_time = datetime.now(timezone.utc).isoformat()
     
     return {
+        "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
         "event_type": "agent_startup",
         "description": f"Agent started successfully at {current_time}",
@@ -89,6 +91,7 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     current_time = datetime.now(timezone.utc).isoformat()
 
     return {
+        "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
         "event_type": "agent_shutdown",
         "description": f"Agent stopped manually at {current_time}",
