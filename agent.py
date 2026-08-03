@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 _STARTUP_BASE_DELAY_SECONDS: float = 5.0
 _STARTUP_MAX_DELAY_SECONDS: float = 60.0
-_STARTUP_MAX_RETRIES: int = 15
+_STARTUP_WARN_AFTER_RETRIES: int = 15
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +102,26 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         "description": f"Agent stopped manually at {current_time}",
     }
 
+
+def build_heartbeat_payload(config: Dict[str, Any], sequence: int) -> Dict[str, Any]:
+    """
+    Construiește payload-ul unui heartbeat.
+
+    Numele cheilor trebuie să corespundă *exact* câmpurilor din HeartbeatRequest
+    de pe server (app/schemas/heartbeat.py). Pydantic ignoră în tăcere cheile
+    necunoscute, așa că o cheie scrisă greșit nu produce nicio eroare: câmpul
+    rămâne pur și simplu None pe server, iar logica ce depinde de el (detecția
+    de repornire prin schimbarea incarnării) nu se declanșează niciodată.
+    De aceea perechea (builder, schemă) este acoperită de test — vezi
+    tests/test_heartbeat_payload.py.
+    """
+    return {
+        "agent_instance_id": config.get("agent_instance_id"),
+        "sequence": sequence,
+        "agent_version": config.get("agent_version"),
+    }
+
+
 def build_file_event_callback(
     spool: EventSpool,
     dispatcher: EventDispatcher,
@@ -145,7 +165,7 @@ def register_agent_with_retry(
     server_url: str,
     system_info: Dict[str, Any],
     stop_event: threading.Event,
-    warn_after_retries: int = _STARTUP_MAX_RETRIES,
+    warn_after_retries: int = _STARTUP_WARN_AFTER_RETRIES,
 ) -> bool:
     """
     Încearcă repetat să contacteze serverul și să înregistreze agentul,
@@ -161,17 +181,29 @@ def register_agent_with_retry(
     deoarece înregistrarea este critică pentru funcționarea agentului, iar
     operatorul se poate afla în așteptare activă.
 
+    Bucla NU abandonează niciodată din cauza numărului de încercări: un server
+    inaccesibil este o stare tranzitorie normală (endpoint pornit înaintea
+    serverului, rețea izolată, mentenanță), nu un motiv de oprire a agentului.
+    Abandonul ar goli inutil endpoint-ul de monitorizare — run_agent() sare
+    peste heartbeat_loop și intră direct în finally, oprind file monitor-ul,
+    dispatcher-ul și spool-ul. Singurele ieșiri sunt FatalTransportError
+    (configurare/autentificare greșită — reîncercarea nu poate ajuta) și
+    setarea stop_event (oprire cerută explicit).
+
     Args:
         config: Configurația agentului.
         server_url: URL-ul serverului EDR.
         system_info: Informațiile despre sistem colectate la pornire.
         stop_event: Eveniment de oprire — dacă este setat, funcția se oprește
                     imediat fără a mai reîncerca.
-        warn_after_retries: Numărul maxim de încercări de înregistrare.
+        warn_after_retries: Pragul de eșecuri consecutive după care se loghează
+                    o singură dată un avertisment de posibilă configurare
+                    greșită. NU limitează numărul de reîncercări.
 
     Returns:
         True dacă înregistrarea a reușit complet.
-        False dacă oprirea a fost solicitată înainte de reușita înregistrării.
+        False dacă oprirea a fost solicitată înainte de reușita înregistrării,
+        sau dacă a apărut o eroare permanentă (FatalTransportError).
     """
     logger.info(
         "Attempting to connect to EDR server at %s (startup backoff: base=%.0fs, max=%.0fs)...",
@@ -212,7 +244,6 @@ def register_agent_with_retry(
                     f"Agent failed to register after {warn_after_retries} attempts. "
                     "Possible misconfiguration. Continuing startup loop."
                 )
-                return False
             stop_event.wait(timeout=delay)
 
     logger.info("Startup loop exited: stop was requested before registration completed.")
@@ -276,11 +307,7 @@ def heartbeat_loop(
     while not stop_event.is_set():
         try:
             heartbeat_sequence += 1
-            heartbeat_payload = {
-                "agents_instance_id": config.get("agent_instance_id"),
-                "sequence": heartbeat_sequence,
-                "agent_version": config.get("agent_version"),
-            }
+            heartbeat_payload = build_heartbeat_payload(config, heartbeat_sequence)
             response = send_heartbeat(server_url, config["agent_id"], heartbeat_payload)
             logger.info(f"Heartbeat response: {response}")
 
