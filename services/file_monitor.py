@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -16,6 +17,13 @@ DEFAULT_EVENT_DEBOUNCE_SECONDS = 2.0
 DEFAULT_MONITORED_EXTENSIONS: FrozenSet[str] = frozenset()
 
 _DEBOUNCE_CLEANUP_INTERVAL_SECONDS = 60.0
+
+# Plafon dur pentru numărul de evenimente urmărite simultan de debouncer.
+# Curățarea pe bază de timp rulează cel mult o dată la
+# _DEBOUNCE_CLEANUP_INTERVAL_SECONDS, deci nu limitează cu nimic o rafală mai
+# scurtă de atât (dezarhivare, build, copiere recursivă, criptare în masă).
+# Plafonul mărginește vârful de memorie independent de ceas.
+_DEBOUNCE_MAX_TRACKED_EVENTS = 10_000
 
 FileEventCallback = Callable[[Dict[str, str]], None]
 
@@ -65,11 +73,28 @@ class EventDebouncer:
 
     Unele aplicații și unele sisteme de operare pot genera mai multe evenimente
     pentru aceeași operație de scriere a unui fișier.
+
+    Memoria este mărginită de două mecanisme independente, care răspund la
+    întrebări diferite:
+      - curățarea periodică (_cleanup_stale_entries) elimină ce a devenit
+        irelevant, cel mult o dată la _DEBOUNCE_CLEANUP_INTERVAL_SECONDS;
+      - plafonul de capacitate (_evict_over_capacity) mărginește câte intrări
+        pot exista simultan, indiferent cât timp a trecut.
     """
 
-    def __init__(self, interval_seconds: float = DEFAULT_EVENT_DEBOUNCE_SECONDS):
+    def __init__(
+        self,
+        interval_seconds: float = DEFAULT_EVENT_DEBOUNCE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        max_tracked_events: int = _DEBOUNCE_MAX_TRACKED_EVENTS,
+    ):
         self.interval_seconds = interval_seconds
-        self._last_seen: Dict[str, float] = {}
+        self.max_tracked_events = max_tracked_events
+        self._clock = clock
+        # OrderedDict, nu dict: ordinea intrărilor este ordinea ultimei apariții
+        # a fiecărei chei, deci capătul din față este întotdeauna candidatul
+        # corect pentru evicțiune.
+        self._last_seen: "OrderedDict[str, float]" = OrderedDict()
         self._last_cleanup_time = 0.0
         self._lock = Lock()
 
@@ -84,22 +109,45 @@ class EventDebouncer:
         
         cutoff = current_time - self.interval_seconds * 2
 
-        self._last_seen = {
-            key: timestamp
+        # Comprehensiunea păstrează ordinea intrărilor rămase, deci ordinea
+        # folosită de _evict_over_capacity supraviețuiește curățării.
+        self._last_seen = OrderedDict(
+            (key, timestamp)
             for key, timestamp in self._last_seen.items()
             if timestamp > cutoff
-        }
+        )
         self._last_cleanup_time = current_time
+
+    def _evict_over_capacity(self) -> None:
+        """Menține numărul de intrări sub plafon, eliminându-le pe cele mai vechi.
+
+        Spre deosebire de curățarea periodică, nu se uită la ceas: mărginește
+        vârful de memorie și în interiorul unei rafale mai scurte decât
+        intervalul de curățare, unde garda de timp nu intervine deloc.
+
+        Compromisul este acceptat conștient: o cheie evacuată înainte de
+        expirarea ferestrei de debounce va fi văzută din nou ca eveniment nou,
+        deci se poate raporta un duplicat. Un duplicat ocazional sub presiune
+        extremă este preferabil unei creșteri nemărginite a memoriei pe
+        endpoint.
+        """
+        while len(self._last_seen) > self.max_tracked_events:
+            self._last_seen.popitem(last=False)
 
     def is_duplicate(self, event_type: str, file_path: str) -> bool:
         """Returnează True dacă evenimentul a fost observat recent."""
         event_key = f"{event_type}:{os.path.normcase(normalize_file_path(file_path))}"
-        current_time = time.monotonic()
+        current_time = self._clock()
 
         with self._lock:
             self._cleanup_stale_entries(current_time)
             previous_time = self._last_seen.get(event_key)
             self._last_seen[event_key] = current_time
+            # Reatribuirea unei chei existente nu îi schimbă poziția, deci
+            # mutarea la capăt este necesară ca ordinea să rămână „ultima
+            # apariție", nu „prima apariție".
+            self._last_seen.move_to_end(event_key)
+            self._evict_over_capacity()
 
         if previous_time is None:
             return False
