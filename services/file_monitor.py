@@ -62,6 +62,7 @@ def build_file_event_payload(
         "client_event_id": str(uuid4()),
         "agent_id": agent_id,
         "event_type": event_type,
+        "occurred_at": current_time,
         "file_path": normalized_path,
         "description": f"{description} at {current_time}",
     }

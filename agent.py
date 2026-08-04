@@ -65,7 +65,6 @@ def build_agent_registration_payload(
     """Construiește payload-ul trimis către server pentru înregistrarea agentului."""
     return {
         "agent_id": config.get("agent_id", "unknown_agent"),
-        "agent_instance_id": config.get("agent_instance_id",),
         "hostname": system_info.get("hostname"),
         "operating_system": system_info.get("operating_system"),
         "ip_address": system_info.get("ip_address"),
@@ -98,7 +97,9 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
+        "agent_instance_id": config.get("agent_instance_id"),
         "event_type": "agent_shutdown",
+        "occurred_at": current_time,
         "description": f"Agent stopped manually at {current_time}",
     }
 
