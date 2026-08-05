@@ -27,13 +27,13 @@ Politica de erori — cheia întregii corecturi:
         bloca la nesfârșit restul cozii (problema clasică "poison message").
 """
 
-from asyncio import timeout
 import logging
 import threading
 from typing import Optional
 
 from services.backoff import HeartbeatBackoffController
 from services.event_spool import EventSpool, EventSpoolError
+from services.stop_signal import StopSignal
 from services.transport import (
     AgentNotRegisteredError,
     FatalTransportError,
@@ -63,7 +63,7 @@ class EventDispatcher(threading.Thread):
         spool: EventSpool,
         server_url: str,
         agent_id: str,
-        stop_event: threading.Event,
+        stop_event: StopSignal,
         logger: Optional[logging.Logger] = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
         idle_poll_seconds: float = DEFAULT_IDLE_POLL_SECONDS,

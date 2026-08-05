@@ -20,6 +20,7 @@ De ce există acest fișier:
     jos fixează comportamentul, nu doar numele parametrilor.
 """
 
+from typing import Optional, List
 import unittest
 from unittest.mock import Mock, patch
 
@@ -55,10 +56,10 @@ class FakeStopEvent:
     echivalentul unui operator care oprește agentul după N reîncercări.
     """
 
-    def __init__(self, trip_after_waits: int = None) -> None:
+    def __init__(self, trip_after_waits: Optional[int] = None) -> None:
         self._is_set = False
         self._trip_after_waits = trip_after_waits
-        self.waits: list = []
+        self.waits: List[Optional[float]] = []
 
     def is_set(self) -> bool:
         return self._is_set
@@ -69,7 +70,7 @@ class FakeStopEvent:
     def clear(self) -> None:
         self._is_set = False
 
-    def wait(self, timeout=None) -> bool:
+    def wait(self, timeout: Optional[float] = None) -> bool:
         self.waits.append(timeout)
         if (
             self._trip_after_waits is not None

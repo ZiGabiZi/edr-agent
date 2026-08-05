@@ -12,6 +12,7 @@ from services.event_spool import EventSpool, EventSpoolError
 from services.file_monitor import FileMonitor, FileMonitorError
 from services.backoff import HeartbeatBackoffController
 from services.config_loader import ConfigError, load_config
+from services.stop_signal import StopSignal
 from services.system_info import collect_system_info
 from services.transport import (
     AgentNotRegisteredError,
@@ -231,7 +232,7 @@ def register_agent_with_retry(
     config: Dict[str, Any],
     server_url: str,
     system_info: Dict[str, Any],
-    stop_event: threading.Event,
+    stop_event: StopSignal,
     warn_after_retries: int = _STARTUP_WARN_AFTER_RETRIES,
 ) -> bool:
     """
@@ -261,8 +262,9 @@ def register_agent_with_retry(
         config: Configurația agentului.
         server_url: URL-ul serverului EDR.
         system_info: Informațiile despre sistem colectate la pornire.
-        stop_event: Eveniment de oprire — dacă este setat, funcția se oprește
-                    imediat fără a mai reîncerca.
+        stop_event: Semnal de oprire (StopSignal) — funcția doar îl
+            interoghează și așteaptă pe el; nu îl setează niciodată.
+            Dacă este setat, bucla se încheie fără a mai reîncerca.
         warn_after_retries: Pragul de eșecuri consecutive după care se loghează
                     o singură dată un avertisment de posibilă configurare
                     greșită. NU limitează numărul de reîncercări.
@@ -326,7 +328,7 @@ def heartbeat_loop(
     server_url: str,
     system_info: Dict[str, Any],
     heartbeat_interval_seconds: int,
-    stop_event: threading.Event,
+    stop_event: StopSignal,
 ) -> None:
     """
     Rulează bucla principală a agentului cu exponential backoff și sleep responsiv.
