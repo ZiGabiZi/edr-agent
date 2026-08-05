@@ -52,10 +52,73 @@ logger = logging.getLogger(__name__)
 _STARTUP_BASE_DELAY_SECONDS: float = 5.0
 _STARTUP_MAX_DELAY_SECONDS: float = 60.0
 _STARTUP_WARN_AFTER_RETRIES: int = 15
+_PROCESS_INSTANCE_ID: str = str(uuid4())
+
+def ensure_agent_instance_id(config: Dict[str, Any]) -> str:
+    """
+    Fixează în config incarnarea rulării curente și o returnează.
+
+    Această funcție este singurul loc din agent care stabilește agent_instance_id.
+    Toți builderii de payload doar *citesc* valoarea, niciodată nu o produc.
+
+    Două proprietăți sunt obligatorii, iar ambele derivă din felul în care
+    serverul interpretează câmpul:
+
+      - stabilă pe durata unei rulări. Apelurile repetate întorc aceeași valoare,
+        pentru că valoarea aparține procesului, nu apelului. Dacă fiecare apel ar
+        genera un UUID nou, serverul ar vedea o repornire la fiecare heartbeat.
+
+      - diferită între rulări. De aceea o valoare venită din config.json este
+        ignorată deliberat: fiind fixă pe disc, ar fi identică la fiecare pornire,
+        serverul n-ar mai observa nicio schimbare, iar detecția de repornire ar
+        fi dezactivată permanent — exact eșecul tăcut pe care îl prevenim aici.
+    """
+    stale_instance_id = config.get("agent_instance_id")
+
+    if stale_instance_id is not None and stale_instance_id != _PROCESS_INSTANCE_ID:
+        logger.warning(
+            "Ignoring agent_instance_id=%r found in configuration: the incarnation "
+            "identifies the running process and is generated at startup. A fixed "
+            "value on disk would be identical across runs and would permanently "
+            "disable restart detection.",
+            stale_instance_id,
+        )
+
+    config["agent_instance_id"] = _PROCESS_INSTANCE_ID
+    return _PROCESS_INSTANCE_ID
+
+
+def _require_agent_instance_id(config: Dict[str, Any]) -> str:
+    """
+    Citește incarnarea din config, refuzând absența ei.
+
+    De ce eroare și nu None: o incarnare lipsă nu doar dezactivează detecția de
+    repornire, ci transformă heartbeat-urile valide în date aruncate. Serverul
+    sare complet peste ramura de repornire (`if instance_id is not None`) și
+    evaluează doar secvența. Rularea nouă începe de la sequence=1, în timp ce pe
+    server e memorat last_sequence de la rularea precedentă — de ordinul miilor
+    după câteva ore. Fiecare heartbeat cade pe ramura `sequence < last_sequence`,
+    e clasificat drept pachet reordonat și ignorat, fără ca last_sequence să
+    avanseze. Agentul apare online (last_seen se actualizează necondiționat,
+    înaintea oricărei ramificații), dar continuitatea nu mai e urmărită deloc
+    până când contorul local ajunge din urmă valoarea de pe server.
+
+    O excepție se vede la primul heartbeat. Tăcerea nu se vede niciodată.
+    """
+    instance_id = config.get("agent_instance_id")
+
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        raise ValueError(
+            f"agent_instance_id missing or empty in configuration "
+            f"(got {instance_id!r}). The incarnation must be established with "
+            f"ensure_agent_instance_id(config) before any payload is built."
+        )
+
+    return instance_id
 
 
 # ---------------------------------------------------------------------------
-# Funcții de construire a payload-urilor (nemodificate)
+# Funcții de construire a payload-urilor
 # ---------------------------------------------------------------------------
 
 def build_agent_registration_payload(
@@ -83,7 +146,7 @@ def build_startup_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
-        "agent_instance_id": config.get("agent_instance_id"),
+        "agent_instance_id": _require_agent_instance_id(config),
         "event_type": "agent_startup",
         "occurred_at": current_time,
         "description": f"Agent started successfully at {current_time}",
@@ -97,7 +160,7 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "client_event_id": str(uuid4()),
         "agent_id": config.get("agent_id", "unknown_agent"),
-        "agent_instance_id": config.get("agent_instance_id"),
+        "agent_instance_id": _require_agent_instance_id(config),
         "event_type": "agent_shutdown",
         "occurred_at": current_time,
         "description": f"Agent stopped manually at {current_time}",
@@ -115,9 +178,12 @@ def build_heartbeat_payload(config: Dict[str, Any], sequence: int) -> Dict[str, 
     de repornire prin schimbarea incarnării) nu se declanșează niciodată.
     De aceea perechea (builder, schemă) este acoperită de test — vezi
     tests/test_heartbeat_payload.py.
+    Incarnarea este citită strict (_require_agent_instance_id): un config fără
+    ea oprește construcția payload-ului în loc să emită None. Motivul detaliat
+    al acestei stricteți e documentat în _require_agent_instance_id.
     """
     return {
-        "agent_instance_id": config.get("agent_instance_id"),
+        "agent_instance_id": _require_agent_instance_id(config),
         "sequence": sequence,
         "agent_version": config.get("agent_version"),
     }
@@ -438,8 +504,7 @@ def run_agent() -> None:
 
     try:
         config = load_config()
-        config["agent_instance_id"] = str(uuid4())
-        logger.info("Agent instance id (this run): %s", config["agent_instance_id"])
+        logger.info("Agent instance id (this run): %s", ensure_agent_instance_id(config))
 
         server_url = config["server_url"]
         heartbeat_interval_seconds = config["heartbeat_interval_seconds"]

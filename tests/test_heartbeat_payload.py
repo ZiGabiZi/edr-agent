@@ -108,6 +108,78 @@ class HeartbeatLoopSequenceTests(unittest.TestCase):
             [config["agent_instance_id"]] * 3,
         )
 
+class IncarnationOwnershipTests(unittest.TestCase):
+    """
+    ensure_agent_instance_id este singurul producător al incarnării.
+
+    Testele de mai jos păzesc exact golul care făcea posibil eșecul tăcut:
+    nimic nu verifica ce se întâmplă când config nu conține deloc cheia, pentru
+    că singurul apelant real (run_agent) o injecta corect. Un refactor care mută
+    sau elimină acea injecție ar fi trecut suita fără nicio alarmă.
+    """
+
+    def test_populates_the_incarnation_when_config_has_none(self) -> None:
+        config = {"agent_id": "agent-test"}
+
+        instance_id = agent.ensure_agent_instance_id(config)
+
+        self.assertTrue(instance_id)
+        self.assertEqual(config["agent_instance_id"], instance_id)
+
+    def test_repeated_calls_keep_the_same_incarnation(self) -> None:
+        """O a doua incarnare în aceeași rulare ar fi citită drept repornire falsă."""
+        first = agent.ensure_agent_instance_id({"agent_id": "agent-test"})
+        second = agent.ensure_agent_instance_id({"agent_id": "agent-test"})
+
+        self.assertEqual(first, second)
+
+    def test_a_value_coming_from_config_json_is_replaced(self) -> None:
+        """
+        O incarnare fixată pe disc ar fi identică la fiecare pornire: serverul
+        n-ar mai vedea nicio schimbare, deci nicio repornire n-ar mai fi detectată.
+        """
+        config = {"agent_id": "agent-test", "agent_instance_id": "fixat-in-config-json"}
+
+        with patch.object(agent, "logger"):
+            instance_id = agent.ensure_agent_instance_id(config)
+
+        self.assertNotEqual(instance_id, "fixat-in-config-json")
+        self.assertEqual(config["agent_instance_id"], instance_id)
+
+
+class PayloadStrictnessTests(unittest.TestCase):
+    """Un config fără incarnare oprește construcția, nu produce un payload cu None."""
+
+    def test_heartbeat_builder_refuses_a_config_without_incarnation(self) -> None:
+        config = _make_config()
+        del config["agent_instance_id"]
+
+        with self.assertRaises(ValueError):
+            agent.build_heartbeat_payload(config, sequence=1)
+
+    def test_heartbeat_builder_refuses_a_blank_incarnation(self) -> None:
+        config = _make_config()
+        config["agent_instance_id"] = "   "
+
+        with self.assertRaises(ValueError):
+            agent.build_heartbeat_payload(config, sequence=1)
+
+    def test_lifecycle_builders_refuse_a_config_without_incarnation(self) -> None:
+        """
+        Evenimentele de ciclu de viață sunt corelate pe server prin incarnare;
+        un None acolo rupe legătura dintre agent_startup și rularea care l-a emis.
+        """
+        config = _make_config()
+        del config["agent_instance_id"]
+
+        for builder in (
+            agent.build_startup_event_payload,
+            agent.build_shutdown_event_payload,
+        ):
+            with self.subTest(builder=builder.__name__):
+                with self.assertRaises(ValueError):
+                    builder(config)
+
 
 if __name__ == "__main__":
     unittest.main()
