@@ -11,55 +11,34 @@ De ce există acest fișier:
     acest timp build_startup_event_payload trimitea agent_instance_id și occurred_at
     către o schemă care nu le declara. Fișierul de față generalizează verificarea la
     toți builderii, ca a patra instanță a aceleiași greșeli să nu mai poată apărea.
+
+    Numele de câmpuri nu mai sunt copiate de mână din codul serverului: vin din
+    contracts/wire-contract.json, exemplarul local al contractului comis identic
+    în ambele repo-uri. Serverul își validează modelele Pydantic față de același
+    fișier, deci o redenumire acolo pică testele acolo — nu peste luni, aici.
 """
 
 import unittest
 
 import agent
 from services.file_monitor import build_file_event_payload
+from tests.wire_contract import (
+    CONTRACT,
+    declared_fields,
+    find_peer_repo,
+    forbidden_fields,
+    load_contract,
+    required_fields,
+)
 
 
-# ---------------------------------------------------------------------------
-# Oglinda schemelor serverului (edr-server/app/schemas/*.py)
-#
-# Repo-urile fiind separate, seturile de mai jos sunt duplicate manual. Când o
-# schemă de pe server se schimbă, setul corespunzător trebuie actualizat în
-# aceeași modificare — altfel testul devine o garanție falsă.
-# ---------------------------------------------------------------------------
-
-# AgentRegisterRequest
-SERVER_REGISTER_FIELDS = frozenset({
-    "agent_id",
-    "agent_version",
-    "hostname",
-    "operating_system",
-    "architecture",
-    "os_architecture",
-    "machine_id_type",
-    "machine_id_hash",
-    "ip_address",
-})
-
-# EventCreateRequest
-SERVER_EVENT_FIELDS = frozenset({
-    "agent_id",
-    "agent_instance_id",
-    "event_type",
-    "client_event_id",
-    "file_path",
-    "sha256",
-    "description",
-    "occurred_at",
-})
-
-# HeartbeatRequest. "agent_id" nu e produs de builder — îl adaugă
-# transport.send_heartbeat() înainte de POST.
-SERVER_HEARTBEAT_FIELDS = frozenset({
-    "agent_id",
-    "agent_version",
-    "sequence",
-    "agent_instance_id",
-})
+# Câmpuri pe care contractul le cere, dar pe care nu le pune builder-ul: sunt
+# adăugate mai jos în stivă, de stratul de transport. E o chestiune de stratificare
+# internă a agentului, nu de protocol, deci nu are ce căuta în contract.
+TRANSPORT_SUPPLIED_FIELDS = {
+    # services/transport.py::send_heartbeat îl copiază din URL în corp.
+    "heartbeat_request": frozenset({"agent_id"}),
+}
 
 
 def _make_config() -> dict:
@@ -83,51 +62,91 @@ def _make_system_info() -> dict:
 
 
 def _all_builder_cases() -> list:
-    """(nume, payload, câmpuri acceptate de schema serverului) pentru fiecare builder."""
+    """(nume builder, payload emis, modelul din contract pe care îl țintește)."""
     config = _make_config()
 
     return [
         (
             "build_agent_registration_payload",
             agent.build_agent_registration_payload(config, _make_system_info()),
-            SERVER_REGISTER_FIELDS,
+            "agent_register_request",
         ),
         (
             "build_startup_event_payload",
             agent.build_startup_event_payload(config),
-            SERVER_EVENT_FIELDS,
+            "event_create_request",
         ),
         (
             "build_shutdown_event_payload",
             agent.build_shutdown_event_payload(config),
-            SERVER_EVENT_FIELDS,
+            "event_create_request",
         ),
         (
             "build_file_event_payload",
             build_file_event_payload("agent-test", "file_created", "C:/tmp/proba.txt"),
-            SERVER_EVENT_FIELDS,
+            "event_create_request",
         ),
         (
             "build_heartbeat_payload",
             agent.build_heartbeat_payload(config, sequence=1),
-            SERVER_HEARTBEAT_FIELDS,
+            "heartbeat_request",
         ),
     ]
 
 
 class PayloadContractTests(unittest.TestCase):
-    """Niciun builder nu are voie să emită o cheie pe care serverul o aruncă."""
+    """Fiecare builder trebuie să respecte modelul pe care îl țintește."""
 
     def test_no_builder_emits_a_key_the_server_would_silently_drop(self) -> None:
-        for builder_name, payload, allowed_fields in _all_builder_cases():
+        for builder_name, payload, model_name in _all_builder_cases():
             with self.subTest(builder=builder_name):
-                dropped = set(payload) - allowed_fields
+                dropped = set(payload) - declared_fields(model_name)
                 self.assertEqual(
                     dropped,
                     set(),
-                    f"{builder_name} trimite chei nedeclarate în schema serverului: "
+                    f"{builder_name} trimite chei nedeclarate de {model_name}: "
                     f"{sorted(dropped)}. Pydantic le aruncă tăcut, agentul primește "
                     f"200 OK, iar câmpurile rămân None pe server.",
+                )
+
+    def test_every_builder_supplies_the_fields_the_contract_makes_mandatory(self) -> None:
+        """
+        Cealaltă direcție: o cheie *ștearsă* din builder lasă payload-ul un subset
+        perfect valid ca formă. Dacă acea cheie e obligatorie, serverul răspunde 422
+        și payload-ul se pierde întreg — la prima rulare, nu la deploy.
+        """
+        for builder_name, payload, model_name in _all_builder_cases():
+            with self.subTest(builder=builder_name):
+                carried = set(payload) | TRANSPORT_SUPPLIED_FIELDS.get(
+                    model_name, frozenset()
+                )
+                missing = required_fields(model_name) - carried
+
+                self.assertEqual(
+                    missing,
+                    set(),
+                    f"{builder_name} nu trimite câmpuri obligatorii în "
+                    f"{model_name}: {sorted(missing)}. Serverul răspunde 422 și "
+                    f"payload-ul se pierde întreg.",
+                )
+
+    def test_no_builder_emits_a_field_the_contract_forbids(self) -> None:
+        """
+        Câmpurile interzise nu sunt curățenie: fiecare are în contract, la 'notes',
+        invarianta pe care prezența lui o rupe. Vezi agent_instance_id în
+        agent_register_request — trimis acolo, dezactivează complet detecția de
+        repornire, fără nicio eroare vizibilă.
+        """
+        for builder_name, payload, model_name in _all_builder_cases():
+            with self.subTest(builder=builder_name):
+                emitted_forbidden = set(payload) & forbidden_fields(model_name)
+
+                self.assertEqual(
+                    emitted_forbidden,
+                    set(),
+                    f"{builder_name} emite câmpuri interzise de {model_name}: "
+                    f"{sorted(emitted_forbidden)}. Motivul interdicției e în "
+                    f"contract, la models.{model_name}.notes.",
                 )
 
     def test_every_event_builder_reports_when_the_event_occurred(self) -> None:
@@ -188,6 +207,9 @@ class RegistrationPayloadTests(unittest.TestCase):
         ca heartbeat-ul să îl poată compara, iar restart_detected n-ar mai fi True
         niciodată. Dacă acest test cade, detecția de repornire e moartă — indiferent
         cât de corect arată codul din agent_service.
+
+        Regula e codificată și în contract (forbidden), iar serverul o verifică pe
+        modelul lui. Testul de față o păstrează pe payload-ul real al agentului.
         """
         payload = agent.build_agent_registration_payload(
             _make_config(), _make_system_info()
@@ -197,6 +219,79 @@ class RegistrationPayloadTests(unittest.TestCase):
             "agent_instance_id",
             payload,
             "Incarnarea aparține exclusiv canalului de heartbeat.",
+        )
+
+    def test_the_contract_still_forbids_the_incarnation_at_registration(self) -> None:
+        """
+        Gardă pentru gardă: testul de mai sus își pierde sensul dacă cineva scoate
+        interdicția din contract și adaugă câmpul în schema serverului. Payload-ul
+        agentului ar rămâne curat, dar invarianta ar fi deja pierdută.
+        """
+        self.assertIn(
+            "agent_instance_id",
+            forbidden_fields("agent_register_request"),
+            "Interdicția a dispărut din contract. Dacă e intenționat, citește mai "
+            "întâi models.agent_register_request.notes: fără ea, restart_detected "
+            "nu mai devine True niciodată.",
+        )
+
+
+class ContractSyncTests(unittest.TestCase):
+    """
+    Cele două exemplare ale contractului trebuie să fie identice.
+
+    Contractul își câștigă rostul doar dacă ambele repo-uri validează *același*
+    text. Un exemplar actualizat pe o singură parte readuce exact problema pe care
+    fișierul o rezolvă — doar că mai greu de observat, pentru că acum arată ca un
+    mecanism care funcționează.
+    """
+
+    def test_the_peer_repository_carries_the_same_contract(self) -> None:
+        peer_repo = find_peer_repo()
+
+        if peer_repo is None:
+            self.skipTest(
+                "edr-server nu a fost găsit lângă agent; sincronizarea celor două "
+                "exemplare rămâne neverificată în această rulare. Setează "
+                "EDR_SERVER_PATH pentru a o verifica."
+            )
+
+        peer_contract = load_contract(peer_repo)
+
+        # Comparăm JSON-ul parsat, nu octeții: repo-urile sunt clonate și pe
+        # Windows, și prin WSL, iar o diferență CRLF/LF ar produce eșecuri false
+        # care n-au nicio legătură cu numele de pe fir.
+        self.assertEqual(
+            peer_contract.get("contract_version"),
+            CONTRACT["contract_version"],
+            f"Exemplarele de contract sunt la versiuni diferite (local "
+            f"v{CONTRACT['contract_version']}, {peer_repo.name} "
+            f"v{peer_contract.get('contract_version')}). Copiază versiunea nouă în "
+            f"repo-ul rămas în urmă — până atunci, cele două părți validează reguli "
+            f"diferite.",
+        )
+
+        # Aceeași versiune, conținut diferit: cineva a editat un exemplar fără să
+        # incrementeze. Raportăm modelele care diferă, nu întregul JSON.
+        local_models = CONTRACT["models"]
+        peer_models = peer_contract["models"]
+        differing_models = sorted(
+            name
+            for name in set(local_models) | set(peer_models)
+            if local_models.get(name) != peer_models.get(name)
+        )
+
+        self.assertEqual(
+            differing_models,
+            [],
+            f"Exemplarele au aceeași versiune, dar descriu diferit modelele: "
+            f"{differing_models}. Un exemplar a fost editat fără să fie propagat.",
+        )
+
+        self.assertEqual(
+            peer_contract,
+            CONTRACT,
+            "Exemplarele diferă în afara secțiunii 'models'.",
         )
 
 

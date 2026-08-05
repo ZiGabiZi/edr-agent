@@ -13,6 +13,10 @@ De ce există acest fișier:
     payload-ul manual, cu numele corecte, deci trec chiar și atunci când agentul
     real trimite altceva. Golul se închide doar dintr-o parte: verificând că
     payload-ul emis de agent folosește exact numele de câmpuri citite de server.
+
+    Numele acelea vin din contracts/wire-contract.json, nu dintr-o copie a
+    schemei ținută aici. Fișierul de contract e comis identic în ambele repo-uri
+    și validat de amândouă (vezi tests/wire_contract.py).
 """
 
 import threading
@@ -21,14 +25,21 @@ from unittest.mock import patch
 
 import agent
 from services.transport import TransportError
+from tests.wire_contract import declared_fields
 
 
-# Câmpurile declarate de HeartbeatRequest în edr-server/app/schemas/heartbeat.py.
-# Orice cheie din payload care nu se află aici este ignorată tăcut de Pydantic.
-# "agent_id" nu e produs de builder — îl adaugă transport.send_heartbeat().
-SERVER_HEARTBEAT_FIELDS = frozenset(
-    {"agent_id", "agent_version", "sequence", "agent_instance_id"}
+# Câmpurile pe care build_heartbeat_payload se angajează să le producă.
+# "agent_id" lipsește intenționat: îl adaugă transport.send_heartbeat().
+BUILDER_HEARTBEAT_FIELDS = frozenset(
+    {"agent_version", "sequence", "agent_instance_id"}
 )
+
+# Câmpurile din răspuns pe care heartbeat_loop le citește efectiv. Sunt
+# hardcodate în agent.py, deci o redenumire pe server le-ar lăsa să întoarcă
+# None fără nicio eroare — testele de la finalul fișierului le leagă de contract.
+NEXT_INTERVAL_FIELD = "next_heartbeat_seconds"
+DIRECTIVE_FIELD = "directive"
+DIRECTIVE_ACTION_FIELD = "action"
 
 
 def _make_config() -> dict:
@@ -52,12 +63,35 @@ class HeartbeatPayloadContractTests(unittest.TestCase):
             payload["agent_instance_id"], config["agent_instance_id"]
         )
 
-    def test_payload_has_no_key_the_server_would_silently_drop(self) -> None:
+    def test_payload_contains_exactly_the_fields_the_agent_commits_to_send(self) -> None:
+        """
+        Egalitate, nu doar „nicio cheie în plus".
+
+        Verificarea unidirecțională prinde greșelile de scriere, dar nu și
+        ștergerile: un câmp scos din builder lasă payload-ul un subset perfect
+        valid, iar Pydantic îi pune None pe server fără nicio eroare. Egalitatea
+        închide și direcția asta.
+        """
         payload = agent.build_heartbeat_payload(_make_config(), sequence=1)
 
-        unknown_keys = set(payload) - SERVER_HEARTBEAT_FIELDS
         self.assertEqual(
-            unknown_keys,
+            set(payload),
+            BUILDER_HEARTBEAT_FIELDS,
+            "Payload-ul de heartbeat nu mai conține exact câmpurile declarate. "
+            "Dacă schimbarea e intenționată, actualizează BUILDER_HEARTBEAT_FIELDS "
+            "împreună cu builder-ul.",
+        )
+
+    def test_every_field_the_agent_sends_is_known_to_the_server(self) -> None:
+        """
+        Cealaltă jumătate a contractului: tot ce pleacă de la agent trebuie să
+        existe în heartbeat_request. Incluziune, nu egalitate — contractul are
+        voie să declare câmpuri opționale pe care agentul nu le trimite încă.
+        """
+        sent_fields = BUILDER_HEARTBEAT_FIELDS | {"agent_id"}
+
+        self.assertEqual(
+            sent_fields - declared_fields("heartbeat_request"),
             set(),
             "Chei necunoscute de HeartbeatRequest — Pydantic le aruncă, "
             "iar câmpul corespunzător rămâne None pe server.",
@@ -179,6 +213,84 @@ class PayloadStrictnessTests(unittest.TestCase):
             with self.subTest(builder=builder.__name__):
                 with self.assertRaises(ValueError):
                     builder(config)
+
+
+class _RecordingStopEvent(threading.Event):
+    """Event care notează cât i s-a cerut să aștepte, fără să aștepte efectiv."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_timeouts: list = []
+
+    def wait(self, timeout=None) -> bool:
+        self.wait_timeouts.append(timeout)
+        return super().wait(0)
+
+
+class HeartbeatResponseContractTests(unittest.TestCase):
+    """
+    Direcția inversă a contractului: ce *citește* agentul din răspuns.
+
+    Modul de eșec e simetric și la fel de tăcut. Agentul citește răspunsul cu
+    response.get(...), deci un câmp redenumit pe server nu produce nicio eroare
+    — doar un None ignorat. Concret, o redenumire a lui next_heartbeat_seconds
+    ar lăsa agentul pe intervalul lui local pentru totdeauna, iar cadența
+    dictată central ar înceta să funcționeze fără ca cineva să observe.
+    """
+
+    def test_the_contract_declares_every_response_field_the_agent_reads(self) -> None:
+        response_fields = declared_fields("heartbeat_response")
+        directive_fields = declared_fields("heartbeat_directive")
+
+        self.assertIn(
+            NEXT_INTERVAL_FIELD,
+            response_fields,
+            "Agentul citește acest câmp în heartbeat_loop; contractul nu îl mai "
+            "declară. Fie a fost redenumit pe server, fie agentul citește un nume "
+            "mort — în ambele cazuri, cadența dictată de server nu mai ajunge.",
+        )
+        self.assertIn(DIRECTIVE_FIELD, response_fields)
+        self.assertIn(
+            DIRECTIVE_ACTION_FIELD,
+            directive_fields,
+            "Fără acest câmp, agentul crede permanent că serverul nu are nimic "
+            "de cerut — inclusiv reînregistrarea.",
+        )
+
+    def test_loop_adopts_the_cadence_the_server_dictates(self) -> None:
+        """
+        Verificarea de nume de mai sus arată doar că numele *există*. Aici se
+        confirmă că agentul chiar îl folosește: răspunsul e construit cu numele
+        din contract, iar intervalul cerut trebuie să ajungă în așteptare.
+        """
+        stop_event = _RecordingStopEvent()
+        server_dictated_interval = 42
+
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+            stop_event.set()
+            return {
+                "status": "ok",
+                "agent_id": agent_id,
+                DIRECTIVE_FIELD: {DIRECTIVE_ACTION_FIELD: "none"},
+                NEXT_INTERVAL_FIELD: server_dictated_interval,
+            }
+
+        with patch.object(agent, "send_heartbeat", fake_send_heartbeat), \
+                patch.object(agent, "logger"):
+            agent.heartbeat_loop(
+                config=_make_config(),
+                server_url="http://127.0.0.1:8000",
+                system_info={},
+                heartbeat_interval_seconds=5,
+                stop_event=stop_event,
+            )
+
+        self.assertEqual(
+            stop_event.wait_timeouts,
+            [server_dictated_interval],
+            "Agentul a rămas pe intervalul local. Câmpul din răspuns nu mai e "
+            "citit sub numele pe care îl declară contractul.",
+        )
 
 
 if __name__ == "__main__":

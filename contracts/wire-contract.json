@@ -1,0 +1,108 @@
+{
+  "contract_version": 1,
+  "title": "Contractul de fir EDR (agent <-> server)",
+  "why": [
+    "Schemele Pydantic ale serverului rulează cu extra=ignore: o cheie pe care schema nu o declară este aruncată tăcut. Agentul primeste 200 OK, serverul nu logheaza nimic, iar campul ramane None pana cand cineva il cauta, luni mai tarziu.",
+    "edr-agent si edr-server sunt repo-uri separate, deci niciun commit nu atinge ambele parti deodata. Fisierul acesta este comis identic in amandoua si este singura sursa de adevar pentru numele de pe fir: fiecare parte isi valideaza propriul cod fata de el, iar testele confrunta cele doua copii ori de cate ori ambele repo-uri sunt pe disc.",
+    "Regula de lucru: orice schimbare de schema incepe aici, incrementeaza contract_version si se aplica in ambele repo-uri in aceeasi sesiune. Un cod care nu mai corespunde contractului pica testele in repo-ul care l-a schimbat, nu peste sase luni in celalalt."
+  ],
+  "field_semantics": {
+    "required": "Campuri fara valoare implicita in modelul Pydantic. Emitatorul trebuie sa le trimita intotdeauna.",
+    "optional": "Campuri declarate de model, dar cu valoare implicita. Emitatorul are voie sa le omita.",
+    "forbidden": "Campuri care NU au voie sa existe in model si nici in payload-ul emis. Nu sunt simpla curatenie: prezenta lor rupe o invarianta descrisa in 'notes'."
+  },
+  "models": {
+    "agent_register_request": {
+      "direction": "agent -> server",
+      "transport": "POST /api/agents/register",
+      "server_model": "app/schemas/agent.py::AgentRegisterRequest",
+      "agent_builder": "agent.py::build_agent_registration_payload",
+      "required": [
+        "agent_id",
+        "hostname",
+        "operating_system",
+        "architecture",
+        "os_architecture",
+        "machine_id_type"
+      ],
+      "optional": [
+        "agent_version",
+        "machine_id_hash",
+        "ip_address"
+      ],
+      "forbidden": [
+        "agent_instance_id"
+      ],
+      "notes": "agent_instance_id este interzis aici pentru ca incarnarea apartine exclusiv canalului de heartbeat. La repornire, reinregistrarea ruleaza inaintea primului heartbeat, iar register_agent() face update() peste inregistrarea existenta: o incarnare venita prin inregistrare ar suprascrie baseline-ul inainte ca heartbeat-ul sa il poata compara, si restart_detected n-ar mai fi True niciodata."
+    },
+    "event_create_request": {
+      "direction": "agent -> server",
+      "transport": "POST /api/events",
+      "server_model": "app/schemas/event.py::EventCreateRequest",
+      "agent_builder": "agent.py::build_startup_event_payload, agent.py::build_shutdown_event_payload, services/file_monitor.py::build_file_event_payload",
+      "required": [
+        "agent_id",
+        "event_type"
+      ],
+      "optional": [
+        "client_event_id",
+        "agent_instance_id",
+        "file_path",
+        "sha256",
+        "description",
+        "occurred_at"
+      ],
+      "forbidden": [],
+      "notes": "occurred_at si agent_instance_id sunt optionale doar pentru compatibilitate cu agenti vechi. Fara occurred_at, singura ordonare posibila pe server este ordinea de livrare, care contrazice ordinea reala exact cand conteaza: un eveniment produs in timpul unei pene de retea se livreaza din spool dupa evenimente mai noi."
+    },
+    "heartbeat_request": {
+      "direction": "agent -> server",
+      "transport": "POST /api/agents/{agent_id}/heartbeat",
+      "server_model": "app/schemas/heartbeat.py::HeartbeatRequest",
+      "agent_builder": "agent.py::build_heartbeat_payload (agent_id este adaugat de services/transport.py::send_heartbeat)",
+      "required": [
+        "agent_id"
+      ],
+      "optional": [
+        "agent_version",
+        "sequence",
+        "agent_instance_id"
+      ],
+      "forbidden": [],
+      "notes": "agent_instance_id este sursa autoritara pentru detectia de repornire; sequence serveste doar la numararea heartbeat-urilor pierdute. Ambele sunt optionale in schema pentru compatibilitate cu build-uri vechi, dar agentul curent le trimite intotdeauna: absenta lor face continuitatea negarantabila (vezi continuity_lost)."
+    },
+    "heartbeat_response": {
+      "direction": "server -> agent",
+      "transport": "POST /api/agents/{agent_id}/heartbeat",
+      "server_model": "app/schemas/heartbeat.py::HeartbeatResponse",
+      "agent_consumer": "agent.py::heartbeat_loop",
+      "required": [
+        "status",
+        "agent_id",
+        "directive",
+        "next_heartbeat_seconds"
+      ],
+      "optional": [
+        "restart_detected",
+        "missed_heartbeats",
+        "continuity_lost"
+      ],
+      "forbidden": [],
+      "notes": "Directia inversa are acelasi mod de esec tacut: agentul citeste raspunsul cu dict.get(), deci un camp redenumit pe server nu produce nicio eroare, ci doar un None ignorat. Concret, daca next_heartbeat_seconds se redenumeste, agentul ramane pe intervalul local pentru totdeauna, iar cadenta dictata central inceteaza sa functioneze fara ca cineva sa observe."
+    },
+    "heartbeat_directive": {
+      "direction": "server -> agent",
+      "transport": "camp imbricat in heartbeat_response.directive",
+      "server_model": "app/schemas/heartbeat.py::HeartbeatDirective",
+      "agent_consumer": "agent.py::heartbeat_loop",
+      "required": [],
+      "optional": [
+        "action",
+        "ruleset_version",
+        "collect_file_path"
+      ],
+      "forbidden": [],
+      "notes": "action este singurul canal prin care serverul cere reinregistrarea. Agentul citeste directive.get('action', 'none'), deci o redenumire l-ar lasa sa creada permanent ca nu are nimic de facut."
+    }
+  }
+}
