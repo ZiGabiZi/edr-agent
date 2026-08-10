@@ -2,10 +2,13 @@
 Teste de contract pentru TOATE payload-urile emise de agent.
 
 De ce există acest fișier:
-    Schemele Pydantic de pe server rulează cu extra="ignore". O cheie trimisă de
-    agent și nedeclarată în schemă este aruncată tăcut: agentul primește 200 OK,
-    serverul nu loghează nimic, iar câmpul rămâne None. Bug-ul nu se manifestă ca
-    eroare, ci ca date care lipsesc luni mai târziu, când cineva le caută.
+    O cheie trimisă de agent și nedeclarată în schema serverului este aruncată la
+    validare: agentul primește 200 OK, iar câmpul rămâne None. Bug-ul nu se
+    manifestă ca eroare, ci ca date care lipsesc luni mai târziu, când cineva le
+    caută. Serverul loghează acum cheia necunoscută (app/schemas/wire.py), dar
+    logul apare abia când un payload greșit ajunge efectiv la el, într-o rulare
+    reală. Testele de aici o prind mai devreme și mai tare: la commit, ca eșec de
+    suită, nu ca linie într-un jurnal la care trebuie să te uiți.
 
     tests/test_heartbeat_payload.py acoperea doar build_heartbeat_payload, iar în
     acest timp build_startup_event_payload trimitea agent_instance_id și occurred_at
@@ -105,8 +108,8 @@ class PayloadContractTests(unittest.TestCase):
                     dropped,
                     set(),
                     f"{builder_name} trimite chei nedeclarate de {model_name}: "
-                    f"{sorted(dropped)}. Pydantic le aruncă tăcut, agentul primește "
-                    f"200 OK, iar câmpurile rămân None pe server.",
+                    f"{sorted(dropped)}. Pydantic le aruncă la validare, agentul "
+                    f"primește 200 OK, iar câmpurile rămân None pe server.",
                 )
 
     def test_every_builder_supplies_the_fields_the_contract_makes_mandatory(self) -> None:

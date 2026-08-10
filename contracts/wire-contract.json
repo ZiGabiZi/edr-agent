@@ -2,7 +2,7 @@
   "contract_version": 1,
   "title": "Contractul de fir EDR (agent <-> server)",
   "why": [
-    "Schemele Pydantic ale serverului rulează cu extra=ignore: o cheie pe care schema nu o declară este aruncată tăcut. Agentul primeste 200 OK, serverul nu logheaza nimic, iar campul ramane None pana cand cineva il cauta, luni mai tarziu.",
+    "O cheie pe care schema serverului nu o declara nu ajunge niciodata in store: Pydantic o arunca la validare, agentul primeste 200 OK, iar campul ramane None. Serverul o logheaza acum cu numele ei (app/schemas/wire.py::WireModel), deci greseala nu mai e complet tacuta — dar logul apare abia cand un payload gresit ajunge efectiv la server, intr-o rulare reala. Contractul muta descoperirea mai devreme: la commit, in repo-ul care a gresit, ca esec de suita, inainte ca payload-ul sa fie trimis vreodata.",
     "edr-agent si edr-server sunt repo-uri separate, deci niciun commit nu atinge ambele parti deodata. Fisierul acesta este comis identic in amandoua si este singura sursa de adevar pentru numele de pe fir: fiecare parte isi valideaza propriul cod fata de el, iar testele confrunta cele doua copii ori de cate ori ambele repo-uri sunt pe disc.",
     "Regula de lucru: orice schimbare de schema incepe aici, incrementeaza contract_version si se aplica in ambele repo-uri in aceeasi sesiune. Un cod care nu mai corespunde contractului pica testele in repo-ul care l-a schimbat, nu peste sase luni in celalalt."
   ],
@@ -88,7 +88,7 @@
         "continuity_lost"
       ],
       "forbidden": [],
-      "notes": "Directia inversa are acelasi mod de esec tacut: agentul citeste raspunsul cu dict.get(), deci un camp redenumit pe server nu produce nicio eroare, ci doar un None ignorat. Concret, daca next_heartbeat_seconds se redenumeste, agentul ramane pe intervalul local pentru totdeauna, iar cadenta dictata central inceteaza sa functioneze fara ca cineva sa observe."
+      "notes": "Directia inversa e singura ramasa complet tacuta: agentul citeste raspunsul cu dict.get(), deci un camp redenumit pe server nu produce nicio eroare, ci doar un None ignorat. Pe directia agent -> server, WireModel logheaza macar cheia necunoscuta; aici nu exista echivalent, pentru ca agentul nu valideaza raspunsul cu nimic. Concret, daca next_heartbeat_seconds se redenumeste, agentul ramane pe intervalul local pentru totdeauna, iar cadenta dictata central inceteaza sa functioneze fara ca cineva sa observe."
     },
     "heartbeat_directive": {
       "direction": "server -> agent",

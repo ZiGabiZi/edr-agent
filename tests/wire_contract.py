@@ -81,7 +81,7 @@ def forbidden_fields(model_name: str) -> frozenset:
 
 
 def declared_fields(model_name: str) -> frozenset:
-    """Tot ce acceptă schema. Orice cheie în plus e aruncată tăcut de Pydantic."""
+    """Tot ce acceptă schema. Restul e aruncat de Pydantic la validare."""
     return required_fields(model_name) | optional_fields(model_name)
 
 

@@ -173,12 +173,14 @@ def build_heartbeat_payload(config: Dict[str, Any], sequence: int) -> Dict[str, 
     Construiește payload-ul unui heartbeat.
 
     Numele cheilor trebuie să corespundă *exact* câmpurilor din HeartbeatRequest
-    de pe server (app/schemas/heartbeat.py). Pydantic ignoră în tăcere cheile
-    necunoscute, așa că o cheie scrisă greșit nu produce nicio eroare: câmpul
-    rămâne pur și simplu None pe server, iar logica ce depinde de el (detecția
-    de repornire prin schimbarea incarnării) nu se declanșează niciodată.
-    De aceea perechea (builder, schemă) este acoperită de test — vezi
-    tests/test_heartbeat_payload.py.
+    de pe server (app/schemas/heartbeat.py). Pydantic aruncă la validare cheile
+    pe care schema nu le declară, așa că o cheie scrisă greșit nu oprește nimic:
+    câmpul rămâne pur și simplu None pe server, iar logica ce depinde de el
+    (detecția de repornire prin schimbarea incarnării) nu se declanșează
+    niciodată. Serverul loghează acum cheia necunoscută (app/schemas/wire.py),
+    dar abia după ce payload-ul greșit a fost deja trimis într-o rulare reală.
+    De aceea perechea (builder, schemă) rămâne acoperită de test, care o prinde
+    la commit — vezi tests/test_heartbeat_payload.py.
     Incarnarea este citită strict (_require_agent_instance_id): un config fără
     ea oprește construcția payload-ului în loc să emită None. Motivul detaliat
     al acestei stricteți e documentat în _require_agent_instance_id.

@@ -4,10 +4,12 @@ Teste de contract pentru payload-ul de heartbeat construit de agent.
 De ce există acest fișier:
     Detecția de repornire de pe server compară incarnarea raportată de agent
     (agent_instance_id) cu ultima incarnare cunoscută. Serverul validează corpul
-    cererii cu Pydantic, iar Pydantic *ignoră în tăcere* cheile pe care nu le
-    cunoaște. Consecința: o cheie scrisă greșit în agent nu produce nicio eroare
-    — nici la agent, nici la server — dar câmpul ajunge None pe server și
-    detecția nu se declanșează niciodată.
+    cererii cu Pydantic, care aruncă cheile pe care schema nu le declară.
+    Consecința: o cheie scrisă greșit în agent nu oprește nimic — nici la agent,
+    nici la server — dar câmpul ajunge None pe server și detecția nu se
+    declanșează niciodată. Serverul loghează acum cheia necunoscută
+    (app/schemas/wire.py), dar abia după ce payload-ul greșit a plecat deja
+    într-o rulare reală.
 
     Testele de pe server (app/tests/test_heartbeat_sequence.py) construiesc
     payload-ul manual, cu numele corecte, deci trec chiar și atunci când agentul
