@@ -27,7 +27,7 @@ from contextlib import contextmanager, ExitStack
 from unittest.mock import patch
 
 import agent
-from services.transport import TransportError
+from services.transport import TransportError, AgentNotRegisteredError
 from tests.wire_contract import declared_fields
 
 
@@ -350,6 +350,59 @@ class HeartbeatResponseContractTests(unittest.TestCase):
             [server_dictated_interval],
             "Agentul a rămas pe intervalul local. Câmpul din răspuns nu mai e "
             "citit sub numele pe care îl declară contractul.",
+        )
+
+
+class HeartbeatLoopReregistrationTests(unittest.TestCase):
+    """O re-înregistrare reușită este o recuperare, nu un eșec de heartbeat."""
+
+    def test_successful_reregistration_clears_the_failure_streak(self) -> None:
+        """
+        Scenariul real: serverul cade, revine cu store volatil, răspunde 404.
+
+        Regresia pe care o prinde: backoff.record_failure() pe calea de succes.
+        Seria de eșecuri de dinaintea lui 404 rămânea în contor, iar agentul
+        tăcea un multiplu al intervalului normal deși conexiunea era restabilită.
+        """
+        stop_event = _RecordingStopEvent()
+        attempts = {"count": 0}
+        recovery_wait = {}
+
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+            attempts["count"] += 1
+
+            if attempts["count"] <= 2:
+                # Server jos: eșecuri reale, care au voie să escaladeze.
+                raise TransportError("connection refused")
+
+            if attempts["count"] == 3:
+                # Server revenit, dar cu store gol: nu mai știe agentul.
+                # Pauza de imediat după re-înregistrare este cea măsurată.
+                recovery_wait["index"] = len(stop_event.wait_timeouts)
+                raise AgentNotRegisteredError("404 agent not found")
+
+            stop_event.set()
+            return {"status": "ok", DIRECTIVE_FIELD: {DIRECTIVE_ACTION_FIELD: "none"}}
+
+        # register_agent_with_retry este înlocuit deliberat: harness-ul sigilează
+        # check_server_health și register_agent, iar aici calea de re-înregistrare
+        # este chiar subiectul testului, nu ceva de traversat până la rețea.
+        with _loop_isolated_from_the_network(fake_send_heartbeat), \
+                patch.object(agent, "register_agent_with_retry", return_value=True):
+            agent.heartbeat_loop(
+                config=_make_config(),
+                server_url="http://127.0.0.1:8000",
+                system_info={},
+                heartbeat_interval_seconds=10,
+                stop_event=stop_event,
+            )
+
+        self.assertEqual(
+            stop_event.wait_timeouts[recovery_wait["index"]],
+            10,
+            "După o re-înregistrare reușită agentul a așteptat un backoff de "
+            "eșec în loc de intervalul normal: seria de eșecuri nu a fost "
+            "resetată, deși serverul tocmai răspunsese.",
         )
 
 
