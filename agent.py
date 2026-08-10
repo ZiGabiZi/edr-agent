@@ -385,6 +385,16 @@ def heartbeat_loop(
             directive = response.get("directive") or {}
             action = directive.get("action", "none")
 
+            # Calea activă de re-înregistrare. Serverul semnalează un agent
+            # necunoscut prin HTTP 200 cu status="unregistered" și directiva de
+            # mai jos, nu prin 404 (app/routes/heartbeat.py), tocmai ca să poată
+            # transporta în același răspuns și next_heartbeat_seconds.
+            #
+            # Ramura AgentNotRegisteredError de mai jos face același lucru pe
+            # varianta cu 404. Orice schimbare aici trebuie oglindită acolo —
+            # cealaltă cale nu se execută contra serverului actual, deci o
+            # divergență nu ar apărea în nicio rulare reală (#11). Echivalența
+            # lor este verificată în tests/test_heartbeat_payload.py.
             if action == "reregister":
                 logger.warning(
                     "Server requested re-registration of agent. Restarting startup loop..."
@@ -415,6 +425,12 @@ def heartbeat_loop(
             logger.critical("Aborting heartbeat loop. Manual intervention required.")
             return
         
+        # Plasă de siguranță, nu calea curentă: serverul actual nu întoarce
+        # niciodată 404 la heartbeat, ci directiva "reregister" tratată mai sus.
+        # Ramura acoperă un server de altă versiune, un proxy care întoarce 404
+        # sau o rută inexistentă. Fiind inaccesibilă în rulările reale, se poate
+        # desincroniza tăcut de calea activă — s-a întâmplat deja (#10) — așa că
+        # echivalența celor două este fixată prin test, nu prin disciplină (#11).
         except AgentNotRegisteredError as error:
             logger.warning(
                 "Server no longer recognizes this agent (%s). Re-registering...",
@@ -425,11 +441,16 @@ def heartbeat_loop(
                 logger.info("Re-registration failed or was aborted. Stopping heartbeat loop.")
                 return
 
+            # Serverul a răspuns și agentul este din nou cunoscut: seria de
+            # eșecuri consecutive descrie capacitatea de a *ajunge* la server,
+            # iar aceasta tocmai a fost demonstrată. record_failure() ar declara
+            # aici un eșec inexistent și ar amâna următorul heartbeat cu un
+            # multiplu al intervalului normal.
             backoff.record_success()
             logger.info(
-                    "Re-registration succeeded. Resuming normal heartbeat cadence in %.1fs.",
-                    current_interval,
-                )
+                "Re-registration succeeded. Resuming normal heartbeat cadence in %.1fs.",
+                current_interval,
+            )
             stop_event.wait(timeout=current_interval)
 
         except TransportError as error:

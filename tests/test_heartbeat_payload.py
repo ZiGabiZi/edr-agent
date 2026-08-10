@@ -354,15 +354,47 @@ class HeartbeatResponseContractTests(unittest.TestCase):
 
 
 class HeartbeatLoopReregistrationTests(unittest.TestCase):
-    """O re-înregistrare reușită este o recuperare, nu un eșec de heartbeat."""
+    """
+    O re-înregistrare reușită este o recuperare, nu un eșec de heartbeat.
 
-    def test_successful_reregistration_clears_the_failure_streak(self) -> None:
+    Bucla află pe două căi distincte că serverul nu o mai cunoaște, iar ambele
+    duc în același loc — register_agent_with_retry:
+
+      - directiva "reregister" dintr-un răspuns HTTP 200 (agent.py, ramura
+        `action == "reregister"`). Aceasta este singura cale pe care o produce
+        serverul actual: la agent necunoscut răspunde 200 cu
+        status="unregistered", ca să poată transporta și next_heartbeat_seconds.
+      - AgentNotRegisteredError, ridicată de transport la HTTP 404.
+
+    De ce testul le rulează pe amândouă (#11):
+        A doua cale nu se execută niciodată contra serverului actual, deci se
+        poate strica fără ca vreo rulare reală să o arate. Exact asta s-a
+        întâmplat în #10: ramura de 404 contabiliza re-înregistrarea reușită
+        drept eșec de heartbeat, iar bug-ul a supraviețuit tocmai pentru că
+        nicio rulare nu ajungea acolo. Cât timp ramura rămâne plasă de siguranță
+        pentru un server de altă versiune sau un proxy care întoarce 404,
+        singurul lucru care o ține sincronizată cu calea activă este testul.
+    """
+
+    NORMAL_INTERVAL = 10
+    FAILURES_BEFORE_RECOVERY = 3
+
+    def _wait_after_reregistration(self, recovery) -> float:
         """
-        Scenariul real: serverul cade, revine cu store volatil, răspunde 404.
+        Rulează bucla prin: eșecuri reale de rețea → recuperare → heartbeat bun.
 
-        Regresia pe care o prinde: backoff.record_failure() pe calea de succes.
-        Seria de eșecuri de dinaintea lui 404 rămânea în contor, iar agentul
-        tăcea un multiplu al intervalului normal deși conexiunea era restabilită.
+        `recovery` decide *doar* cum află agentul că serverul nu îl mai
+        recunoaște — aruncând AgentNotRegisteredError sau întorcând răspunsul cu
+        directiva "reregister". Restul scenariului este identic pe ambele căi,
+        deci orice diferență între rezultate vine din ramura pe care a intrat
+        bucla, nu din montaj.
+
+        Eșecurile de dinainte sunt esențiale: ele urcă seria de eșecuri
+        consecutive, iar întrebarea testului este dacă recuperarea o resetează.
+        Fără ele, ambele căi ar întoarce intervalul normal chiar și greșit
+        implementate, pentru că nu ar exista nicio serie de resetat.
+
+        Returnează pauza cerută imediat după re-înregistrarea reușită.
         """
         stop_event = _RecordingStopEvent()
         attempts = {"count": 0}
@@ -371,15 +403,15 @@ class HeartbeatLoopReregistrationTests(unittest.TestCase):
         def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
             attempts["count"] += 1
 
-            if attempts["count"] <= 2:
+            if attempts["count"] <= self.FAILURES_BEFORE_RECOVERY:
                 # Server jos: eșecuri reale, care au voie să escaladeze.
                 raise TransportError("connection refused")
 
-            if attempts["count"] == 3:
+            if attempts["count"] == self.FAILURES_BEFORE_RECOVERY + 1:
                 # Server revenit, dar cu store gol: nu mai știe agentul.
                 # Pauza de imediat după re-înregistrare este cea măsurată.
                 recovery_wait["index"] = len(stop_event.wait_timeouts)
-                raise AgentNotRegisteredError("404 agent not found")
+                return recovery(agent_id)
 
             stop_event.set()
             return {"status": "ok", DIRECTIVE_FIELD: {DIRECTIVE_ACTION_FIELD: "none"}}
@@ -393,16 +425,73 @@ class HeartbeatLoopReregistrationTests(unittest.TestCase):
                 config=_make_config(),
                 server_url="http://127.0.0.1:8000",
                 system_info={},
-                heartbeat_interval_seconds=10,
+                heartbeat_interval_seconds=self.NORMAL_INTERVAL,
                 stop_event=stop_event,
             )
 
+        return stop_event.wait_timeouts[recovery_wait["index"]]
+
+    @staticmethod
+    def _raises_not_registered(agent_id):
+        """Calea de 404: transportul ridică excepția în locul unui răspuns."""
+        raise AgentNotRegisteredError("404 agent not found")
+
+    @classmethod
+    def _answers_with_reregister_directive(cls, agent_id) -> dict:
+        """
+        Calea activă: răspunsul real al serverului la agent necunoscut.
+
+        Reprodus după app/routes/heartbeat.py — HTTP 200, status "unregistered",
+        directivă de reînregistrare și cadența dictată mai departe.
+        """
+        return {
+            "status": "unregistered",
+            "agent_id": agent_id,
+            DIRECTIVE_FIELD: {DIRECTIVE_ACTION_FIELD: "reregister"},
+            NEXT_INTERVAL_FIELD: cls.NORMAL_INTERVAL,
+        }
+
+    def test_the_404_path_clears_the_failure_streak(self) -> None:
+        """
+        Regresia pe care o prinde: backoff.record_failure() pe calea de succes.
+
+        Seria de eșecuri de dinaintea lui 404 rămânea în contor, iar agentul
+        tăcea un multiplu al intervalului normal deși conexiunea era restabilită.
+        """
         self.assertEqual(
-            stop_event.wait_timeouts[recovery_wait["index"]],
-            10,
+            self._wait_after_reregistration(self._raises_not_registered),
+            self.NORMAL_INTERVAL,
             "După o re-înregistrare reușită agentul a așteptat un backoff de "
             "eșec în loc de intervalul normal: seria de eșecuri nu a fost "
             "resetată, deși serverul tocmai răspunsese.",
+        )
+
+    def test_the_directive_path_clears_the_failure_streak(self) -> None:
+        """Calea produsă de serverul actual, verificată cu aceeași măsură."""
+        self.assertEqual(
+            self._wait_after_reregistration(self._answers_with_reregister_directive),
+            self.NORMAL_INTERVAL,
+            "Directiva de reînregistrare a fost onorată, dar agentul a rămas pe "
+            "un backoff de eșec în loc de cadența normală.",
+        )
+
+    def test_both_reregistration_paths_agree(self) -> None:
+        """
+        Divergența dintre cele două căi este ea însăși defectul (#11).
+
+        Testele de mai sus fixează *valoarea* pauzei; acesta fixează *acordul*.
+        Distincția contează la o schimbare deliberată de comportament: dacă
+        cineva decide că după o re-înregistrare se așteaptă altceva decât
+        intervalul normal, celelalte două trebuie actualizate, dar acesta
+        trebuie să continue să treacă — altfel schimbarea a fost aplicată pe o
+        singură cale, iar cea care nu se execută niciodată a rămas în urmă.
+        """
+        self.assertEqual(
+            self._wait_after_reregistration(self._raises_not_registered),
+            self._wait_after_reregistration(self._answers_with_reregister_directive),
+            "Cele două căi de re-înregistrare au ajuns la pauze diferite. Una "
+            "dintre ele nu se execută niciodată contra serverului actual, deci "
+            "diferența nu ar apărea în nicio rulare reală.",
         )
 
 
