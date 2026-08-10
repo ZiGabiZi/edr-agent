@@ -28,22 +28,55 @@ _BASE_DIR = Path(__file__).resolve().parent
 _LOG_FILE_PATH = _BASE_DIR / "agent.log"
 _LOG_FILE_MAX_BYTES: int = 10 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT: int = 5
+_LOG_FORMAT = "%(asctime)s - [%(levelname)s] - %(message)s"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(message)s",
-    handlers=[
-        RotatingFileHandler(
-            _LOG_FILE_PATH,
-            maxBytes=_LOG_FILE_MAX_BYTES,
-            backupCount=_LOG_FILE_BACKUP_COUNT,
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
-)
 
 logger = logging.getLogger(__name__)
+
+def configure_logging(
+        log_file_path: Path = _LOG_FILE_PATH,
+        level: int = logging.INFO,
+) -> None:
+    """
+    Instalează jurnalizarea procesului: fișier rotativ + consolă.
+
+    De ce nu la nivel de modul:
+        `import agent` trebuie să fie inert. Configurarea executată la import
+        deschidea agent.log din rădăcina repo-ului pentru *orice* proces care
+        importă modulul, inclusiv colectarea testelor. Consecințele nu sunt
+        cosmetice: handlerele se instalează pe root logger, deci prind
+        înregistrările *oricărui* logger din proces — nu doar `agent.logger`,
+        ci și cele din services/, care propagă implicit. O rulare de teste
+        suficient de zgomotoasă poate împinge fișierul peste pragul de 10 MB
+        și roti date forensice reale, iar pe Windows handle-ul rămâne deschis
+        pe același fișier în care scrie un agent aflat în producție.
+
+        Efectele de proces aparțin punctului de intrare, nu importului. De
+        aceea funcția este apelată din main(), iar run_agent() rămâne apelabil
+        din teste fără să atingă jurnalul operatorului.
+
+    force=True:
+        Procesul agent își asumă integral jurnalizarea. Fără el, basicConfig()
+        nu face nimic dacă root logger-ul are deja un handler pus de altcineva
+        (un wrapper de serviciu, o bibliotecă), iar rezultatul ar fi absența
+        tăcută a lui agent.log — exact tipul de eșec pe care un agent EDR nu
+        și-l permite. Tot force=True face funcția sigură la un al doilea apel:
+        handlerele vechi sunt închise, nu duplicate.
+        """
+    logging.basicConfig(
+        level=level,
+        format=_LOG_FORMAT,
+        handlers=[
+            RotatingFileHandler(
+                log_file_path,
+                maxBytes=_LOG_FILE_MAX_BYTES,
+                backupCount=_LOG_FILE_BACKUP_COUNT,
+                encoding="utf-8",
+            ),
+            logging.StreamHandler(),
+        ],
+        force=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,11 +395,14 @@ def heartbeat_loop(
 
     current_interval = heartbeat_interval_seconds
 
-    # Contor de secvență per proces: pornește de la 1 la fiecare lansare a agentului
-    # și crește monoton cu fiecare încercare de heartbeat. Serverul îl folosește ca
-    # semnal de continuitate — un gol înseamnă heartbeat-uri pierdute, iar resetarea
-    # la o valoare mai mică decât ultima cunoscută înseamnă că procesul agentului a
-    # repornit (crash, kill, tampering) chiar dacă nu a apucat un shutdown controlat.
+    """
+    Contor de secvență per proces: pornește de la 1 la fiecare lansare a agentului
+    și crește monoton cu fiecare încercare de heartbeat. Serverul îl folosește ca
+    semnal de continuitate — un gol înseamnă heartbeat-uri pierdute, iar resetarea
+    la o valoare mai mică decât ultima cunoscută înseamnă că procesul agentului a
+    repornit (crash, kill, tampering) chiar dacă nu a apucat un shutdown controlat.\
+    
+    """
     heartbeat_sequence = 0
 
     backoff = HeartbeatBackoffController(
@@ -384,17 +420,18 @@ def heartbeat_loop(
 
             directive = response.get("directive") or {}
             action = directive.get("action", "none")
-
-            # Calea activă de re-înregistrare. Serverul semnalează un agent
-            # necunoscut prin HTTP 200 cu status="unregistered" și directiva de
-            # mai jos, nu prin 404 (app/routes/heartbeat.py), tocmai ca să poată
-            # transporta în același răspuns și next_heartbeat_seconds.
-            #
-            # Ramura AgentNotRegisteredError de mai jos face același lucru pe
-            # varianta cu 404. Orice schimbare aici trebuie oglindită acolo —
-            # cealaltă cale nu se execută contra serverului actual, deci o
-            # divergență nu ar apărea în nicio rulare reală (#11). Echivalența
-            # lor este verificată în tests/test_heartbeat_payload.py.
+            """
+                Calea activă de re-înregistrare. Serverul semnalează un agent
+                necunoscut prin HTTP 200 cu status="unregistered" și directiva de
+                mai jos, nu prin 404 (app/routes/heartbeat.py), tocmai ca să poată
+                transporta în același răspuns și next_heartbeat_seconds.
+                
+                Ramura AgentNotRegisteredError de mai jos face același lucru pe
+                varianta cu 404. Orice schimbare aici trebuie oglindită acolo —
+                cealaltă cale nu se execută contra serverului actual, deci o
+                divergență nu ar apărea în nicio rulare reală (#11). Echivalența
+                lor este verificată în tests/test_heartbeat_payload.py.
+            """
             if action == "reregister":
                 logger.warning(
                     "Server requested re-registration of agent. Restarting startup loop..."
@@ -628,6 +665,21 @@ def run_agent() -> None:
 
         logger.info("Agent stopped.")
 
+def main() -> None:
+    """
+    Punctul de intrare al procesului agent.
+
+    Separarea față de run_agent() este deliberată. Aici stau efectele care
+    aparțin procesului (jurnalizarea), acolo stă doar ciclul de viață al
+    agentului. Testele apelează run_agent() direct (tests/test_agent_startup.py),
+    deci orice efect de proces mutat înăuntru s-ar reproduce la fiecare rulare
+    a suitei — inclusiv redeschiderea jurnalului de producție.
+
+    Un wrapper de serviciu Windows (win32serviceutil) trebuie să apeleze main(),
+    nu run_agent(), altfel serviciul rulează fără jurnal pe disc.
+    """
+    configure_logging()
+    run_agent()
 
 if __name__ == "__main__":
-    run_agent()
+    main()
