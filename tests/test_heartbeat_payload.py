@@ -21,6 +21,7 @@ De ce există acest fișier:
 
 import threading
 import unittest
+from contextlib import contextmanager, ExitStack
 from unittest.mock import patch
 
 import agent
@@ -103,6 +104,65 @@ class HeartbeatPayloadContractTests(unittest.TestCase):
         self.assertEqual(payload["sequence"], 7)
 
 
+# Ușile către rețea importate în agent.py. heartbeat_loop poate ajunge la
+# check_server_health și register_agent fără să le numească vreodată direct:
+# și directiva "reregister", și ramura AgentNotRegisteredError trec prin
+# register_agent_with_retry, care le apelează pe amândouă.
+_TRANSPORT_ENTRY_POINTS = ("check_server_health", "register_agent", "send_event")
+
+
+def _refuse_network_call(name: str):
+    """Înlocuiește o funcție de transport care nu are voie să fie atinsă."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(
+            f"{name}() a fost apelat în timpul unui test de buclă. Bucla a ajuns "
+            "pe o cale care iese în rețea (directivă 'reregister' sau "
+            "AgentNotRegisteredError -> register_agent_with_retry). Dacă acea cale "
+            "este chiar subiectul testului, înlocuiește "
+            "agent.register_agent_with_retry cu un dublu; altfel corectează "
+            "răspunsul fals, ca bucla să nu mai ajungă acolo."
+        )
+
+    return refuse
+
+
+@contextmanager
+def _loop_isolated_from_the_network(fake_send_heartbeat):
+    """
+    Rulează heartbeat_loop cu un singur punct de contact fals: send_heartbeat.
+
+    De ce nu e suficient să înlocuiești doar send_heartbeat:
+        heartbeat_loop are două ramuri care cheamă register_agent_with_retry —
+        directiva "reregister" și AgentNotRegisteredError. Bucla aceea folosește
+        check_server_health și register_agent, care ar rămâne cele reale. Un
+        răspuns fals schimbat mai târziu ar transforma testul unitar în trafic
+        HTTP: fie reîncercări la nesfârșit contra unui port închis (bucla de
+        startup nu abandonează niciodată din cauza numărului de încercări, iar
+        stop_event se setează doar din send_heartbeat, care nu mai e apelat), fie
+        — dacă serverul de dezvoltare chiar ascultă pe acel port — o înregistrare
+        reală, cu scriere în baza lui de date.
+
+        În ambele cazuri rezultatul testului ar depinde de ce rulează pe mașina
+        celui care îl execută. Sigilarea îl face să eșueze imediat, cu motivul
+        scris în mesaj, în loc să atârne sau să atingă un server real.
+    """
+    with ExitStack() as patches:
+        patches.enter_context(
+            patch.object(agent, "send_heartbeat", fake_send_heartbeat)
+        )
+        patches.enter_context(patch.object(agent, "logger"))
+
+        for name in _TRANSPORT_ENTRY_POINTS:
+            patches.enter_context(
+                patch.object(agent, name, _refuse_network_call(name))
+            )
+
+        yield
+
+
+
+
 class HeartbeatLoopSequenceTests(unittest.TestCase):
     """Secvența crește o dată per *încercare*, inclusiv peste eșecuri de rețea."""
 
@@ -124,10 +184,9 @@ class HeartbeatLoopSequenceTests(unittest.TestCase):
 
             return {"status": "ok", "directive": {"action": "none"}}
 
-        with patch.object(agent, "send_heartbeat", fake_send_heartbeat), \
-                patch.object(agent, "logger"):
+        with _loop_isolated_from_the_network(fake_send_heartbeat):
             agent.heartbeat_loop(
-                config=config,
+                config=_make_config(),
                 server_url="http://127.0.0.1:8000",
                 system_info={},
                 heartbeat_interval_seconds=0.01,
@@ -275,8 +334,7 @@ class HeartbeatResponseContractTests(unittest.TestCase):
                 NEXT_INTERVAL_FIELD: server_dictated_interval,
             }
 
-        with patch.object(agent, "send_heartbeat", fake_send_heartbeat), \
-                patch.object(agent, "logger"):
+        with _loop_isolated_from_the_network(fake_send_heartbeat):
             agent.heartbeat_loop(
                 config=_make_config(),
                 server_url="http://127.0.0.1:8000",

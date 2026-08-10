@@ -327,7 +327,7 @@ def heartbeat_loop(
     config: Dict[str, Any],
     server_url: str,
     system_info: Dict[str, Any],
-    heartbeat_interval_seconds: int,
+    heartbeat_interval_seconds: float,
     stop_event: StopSignal,
 ) -> None:
     """
