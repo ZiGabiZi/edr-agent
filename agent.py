@@ -396,12 +396,17 @@ def heartbeat_loop(
     current_interval = heartbeat_interval_seconds
 
     """
-    Contor de secvență per proces: pornește de la 1 la fiecare lansare a agentului
-    și crește monoton cu fiecare încercare de heartbeat. Serverul îl folosește ca
-    semnal de continuitate — un gol înseamnă heartbeat-uri pierdute, iar resetarea
-    la o valoare mai mică decât ultima cunoscută înseamnă că procesul agentului a
-    repornit (crash, kill, tampering) chiar dacă nu a apucat un shutdown controlat.\
-    
+        Contor de secvență per proces: pornește de la 1 la fiecare lansare a agentului
+        și crește monoton cu fiecare *încercare* de heartbeat, inclusiv cu cele care
+        eșuează. Serverul îl folosește ca semnal de continuitate a încercărilor: un gol
+        înseamnă încercări care nu au ajuns, iar o valoare mai mică decât ultima
+        cunoscută, la un agent fără incarnare, înseamnă continuitate negarantabilă.
+
+        Ce NU măsoară: durata unei pene. Încercările sunt distanțate de backoff-ul
+        exponențial de mai jos (services/backoff.py), deci într-o cădere lungă contorul
+        crește de câteva ori, nu o dată la fiecare interval de heartbeat. Numărul de
+        ferestre ratate este derivat pe server din propriul ceas (last_seen), tocmai
+        pentru că acest contor nu îl poate purta.
     """
     heartbeat_sequence = 0
 
@@ -508,6 +513,7 @@ def start_file_monitoring(
     """
     monitor = FileMonitor(
         agent_id=config["agent_id"],
+        agent_instance_id=_require_agent_instance_id(config),
         monitored_directories=config["monitored_directories"],
         recursive_monitoring=config["recursive_monitoring"],
         event_callback=event_callback,

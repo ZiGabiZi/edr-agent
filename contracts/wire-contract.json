@@ -1,5 +1,5 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "title": "Contractul de fir EDR (agent <-> server)",
   "why": [
     "O cheie pe care schema serverului nu o declara nu ajunge niciodata in store: Pydantic o arunca la validare, agentul primeste 200 OK, iar campul ramane None. Serverul o logheaza acum cu numele ei (app/schemas/wire.py::WireModel), deci greseala nu mai e complet tacuta — dar logul apare abia cand un payload gresit ajunge efectiv la server, intr-o rulare reala. Contractul muta descoperirea mai devreme: la commit, in repo-ul care a gresit, ca esec de suita, inainte ca payload-ul sa fie trimis vreodata.",
@@ -69,7 +69,7 @@
         "agent_instance_id"
       ],
       "forbidden": [],
-      "notes": "agent_instance_id este sursa autoritara pentru detectia de repornire; sequence serveste doar la numararea heartbeat-urilor pierdute. Ambele sunt optionale in schema pentru compatibilitate cu build-uri vechi, dar agentul curent le trimite intotdeauna: absenta lor face continuitatea negarantabila (vezi continuity_lost)."
+      "notes": "agent_instance_id este sursa autoritara pentru detectia de repornire; sequence serveste la numararea incercarilor de heartbeat care nu au ajuns (failed_attempts), NU la masurarea duratei unei pene: incercarile sunt rarite de backoff exponential, iar ferestrele ratate sunt derivate server-side din last_seen. Ambele sunt optionale in schema pentru compatibilitate cu build-uri vechi, dar agentul curent le trimite intotdeauna: absenta lor face continuitatea negarantabila (vezi continuity_lost)."
     },
     "heartbeat_response": {
       "direction": "server -> agent",
@@ -85,6 +85,8 @@
       "optional": [
         "restart_detected",
         "missed_heartbeats",
+        "failed_attempts",
+        "silence_seconds",
         "continuity_lost"
       ],
       "forbidden": [],

@@ -177,8 +177,11 @@ class HeartbeatLoopSequenceTests(unittest.TestCase):
             sent_payloads.append(dict(heartbeat_payload))
 
             if len(sent_payloads) == 2:
-                # Heartbeat pierdut: secvența trebuie să avanseze oricum, altfel
-                # serverul nu ar putea număra heartbeat-urile lipsă.
+                # Încercare eșuată: secvența trebuie să avanseze oricum, altfel
+                # serverul nu ar putea deosebi o încercare pierdută de o
+                # retransmisie a celei precedente (ramura de duplicat idempotent
+                # din record_heartbeat). Contorul numără încercări, nu ferestre de
+                # heartbeat — durata penei o măsoară serverul din last_seen.
                 raise TransportError("server indisponibil")
 
             if len(sent_payloads) == 3:

@@ -21,10 +21,13 @@ De ce există acest fișier:
     fișier, deci o redenumire acolo pică testele acolo — nu peste luni, aici.
 """
 
+import logging
 import unittest
 
+from watchdog.events import FileCreatedEvent
+
 import agent
-from services.file_monitor import build_file_event_payload
+from services.file_monitor import EDRFileEventHandler, build_file_event_payload
 from tests.wire_contract import (
     CONTRACT,
     declared_fields,
@@ -86,7 +89,7 @@ def _all_builder_cases() -> list:
         ),
         (
             "build_file_event_payload",
-            build_file_event_payload("agent-test", "file_created", "C:/tmp/proba.txt"),
+            build_file_event_payload("agent-test", "file_created", "C:/tmp/proba.txt", config["agent_instance_id"]),
             "event_create_request",
         ),
         (
@@ -163,7 +166,7 @@ class PayloadContractTests(unittest.TestCase):
         event_payloads = {
             "startup": agent.build_startup_event_payload(config),
             "shutdown": agent.build_shutdown_event_payload(config),
-            "file": build_file_event_payload("agent-test", "file_created", "C:/tmp/proba.txt"),
+            "file": build_file_event_payload("agent-test", "file_created", "C:/tmp/proba.txt", config["agent_instance_id"]),
         }
 
         for name, payload in event_payloads.items():
@@ -295,6 +298,33 @@ class ContractSyncTests(unittest.TestCase):
             peer_contract,
             CONTRACT,
             "Exemplarele diferă în afara secțiunii 'models'.",
+        )
+
+class FileEventWiringTests(unittest.TestCase):
+    """
+    Între builder și watchdog stau două constructoare. Testul de contract
+    verifică funcția izolat, deci un handler care uită să paseze incarnarea
+    trece neobservat — până la primul eveniment real de fișier, unde nu produce
+    un câmp lipsă, ci un TypeError care omoară thread-ul observer-ului.
+    """
+
+    def test_the_handler_stamps_events_with_the_running_incarnation(self) -> None:
+        captured: list = []
+        config = _make_config()
+
+        handler = EDRFileEventHandler(
+            agent_id=config["agent_id"],
+            agent_instance_id=config["agent_instance_id"],
+            monitored_directories=["C:/tmp"],
+            event_callback=captured.append,
+            logger=logging.getLogger("test"),
+        )
+
+        handler.on_created(FileCreatedEvent("C:/tmp/proba.txt"))
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(
+            captured[0]["agent_instance_id"], config["agent_instance_id"]
         )
 
 

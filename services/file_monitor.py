@@ -46,6 +46,7 @@ def build_file_event_payload(
     agent_id: str,
     event_type: str,
     file_path: str,
+    agent_instance_id: str,
 ) -> Dict[str, str]:
     """Construiește payload-ul unui eveniment de fișier."""
     current_time = datetime.now(timezone.utc).isoformat()
@@ -61,6 +62,7 @@ def build_file_event_payload(
     return {
         "client_event_id": str(uuid4()),
         "agent_id": agent_id,
+        "agent_instance_id": agent_instance_id,
         "event_type": event_type,
         "occurred_at": current_time,
         "file_path": normalized_path,
@@ -162,6 +164,7 @@ class EDRFileEventHandler(FileSystemEventHandler):
     def __init__(
         self,
         agent_id: str,
+        agent_instance_id: str,
         monitored_directories: Iterable[str],
         event_callback: FileEventCallback,
         logger: logging.Logger,
@@ -171,6 +174,7 @@ class EDRFileEventHandler(FileSystemEventHandler):
         super().__init__()
 
         self.agent_id = agent_id
+        self.agent_instance_id = agent_instance_id
         self.monitored_directories = tuple(
             normalize_file_path(directory)
             for directory in monitored_directories
@@ -262,6 +266,7 @@ class EDRFileEventHandler(FileSystemEventHandler):
 
         payload = build_file_event_payload(
             agent_id=self.agent_id,
+            agent_instance_id=self.agent_instance_id,
             event_type=event_type,
             file_path=normalized_path,
         )
@@ -295,6 +300,7 @@ class FileMonitor:
     def __init__(
         self,
         agent_id: str,
+        agent_instance_id: str,
         monitored_directories: Iterable[str],
         recursive_monitoring: bool,
         event_callback: FileEventCallback,
@@ -303,6 +309,7 @@ class FileMonitor:
         debounce_seconds: float = DEFAULT_EVENT_DEBOUNCE_SECONDS,
     ):
         self.agent_id = agent_id
+        self.agent_instance_id = agent_instance_id
         self.monitored_directories = list(monitored_directories)
         self.recursive_monitoring = recursive_monitoring
         self.logger = logger or logging.getLogger(__name__)
@@ -310,6 +317,7 @@ class FileMonitor:
         self.observer = Observer()
         self.handler = EDRFileEventHandler(
             agent_id=agent_id,
+            agent_instance_id=agent_instance_id,
             monitored_directories=self.monitored_directories,
             event_callback=event_callback,
             logger=self.logger,
