@@ -3,7 +3,7 @@ import signal
 import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, Callable, Optional
+from typing import Any, Dict, Callable, Optional, TypeGuard
 from uuid import uuid4
 from pathlib import Path
 
@@ -358,6 +358,46 @@ def register_agent_with_retry(
 # Bucla principală de heartbeat
 # ---------------------------------------------------------------------------
 
+def _is_usable_heartbeat_interval(value: Any) -> TypeGuard[float]:
+    """
+    Decide dacă valoarea primită de la server poate deveni cadență de heartbeat.
+
+    De ce nu e suficient isinstance(value, (int, float)):
+        bool este subclasă de int în Python, deci isinstance(True, int) este
+        True, iar True > 0 la fel. Un răspuns cu next_heartbeat_seconds: true
+        trece verificarea și devine interval: stop_event.wait(timeout=True)
+        așteaptă o secundă în loc de zece, iar backoff.base_delay ajunge 1.0,
+        deci nici degradarea la cădere de rețea nu mai rărește traficul.
+        Amplificarea nu e locală — valoarea vine de la server, deci tot parcul
+        de agenți își schimbă cadența în același heartbeat.
+
+    De ce nu se bazează pe validarea serverului:
+        Nu există. Agentul citește răspunsul cu dict.get(), fără niciun model
+        (services/transport.py::send_heartbeat întoarce JSON-ul brut), iar pe
+        server Pydantic în mod lax acceptă bool pentru un câmp int și îl
+        coercionează tăcut la 1. Serverul actual trimite o constantă hardcodată,
+        deci un `true` nu poate veni de la el azi; verificarea păzește restul —
+        o versiune diferită de server, un proxy interpus, un server compromis.
+        Canalul de comandă al unui agent EDR este o intrare neîncrezută.
+
+    De ce TypeGuard și nu bool:
+        response.get(...) are tipul `Any | None`, iar un predicat care întoarce
+        bool nu spune nimic verificatorului de tipuri despre argumentul primit:
+        după `current_interval = next_interval`, current_interval rămâne
+        `Any | None`, iar float(current_interval) e semnalat ca posibil
+        float(None) — în tot restul buclei, de la a doua iterație încolo.
+        TypeGuard leagă rezultatul de tipul valorii verificate, deci îngustarea
+        făcută aici se propagă în apelant. Este strict o adnotare: la rulare,
+        funcția întoarce același bool. `float` acoperă și int-urile — în
+        sistemul de tipuri, int este acceptat oriunde se cere float.
+    """
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > 0
+    )
+
+
 def heartbeat_loop(
     config: Dict[str, Any],
     server_url: str,
@@ -451,13 +491,27 @@ def heartbeat_loop(
                 logger.info("Server requested ruleset update. Implement update logic here.")
 
             next_interval = response.get("next_heartbeat_seconds")
-            if isinstance(next_interval, (int, float)) and next_interval > 0:
+            if _is_usable_heartbeat_interval(next_interval):
                 if next_interval != current_interval:
                     logger.info(
                         f"Server adjusted heartbeat cadence: {current_interval}s -> {next_interval}s."
                     )
                 current_interval = next_interval
                 backoff.base_delay = float(current_interval)
+
+            # O valoare prezentă, dar inutilizabilă, nu e același lucru cu absența
+            # ei: cineva a trimis ceva, iar agentul a decis să nu asculte. Fără
+            # linia asta, decizia rămâne invizibilă, iar diferența dintre un server
+            # care dictează greșit și unul care nu dictează deloc se vede abia din
+            # capturi de trafic. None rămâne tăcut — absența câmpului e păzită de
+            # testele de contract, nu de log.
+            elif next_interval is not None:
+                logger.warning(
+                    "Ignoring unusable next_heartbeat_seconds from server (%r). "
+                    "Keeping current cadence of %ss.",
+                    next_interval,
+                    current_interval,
+                )
 
             backoff.record_success()
             stop_event.wait(timeout=current_interval)

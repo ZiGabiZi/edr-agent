@@ -355,6 +355,51 @@ class HeartbeatResponseContractTests(unittest.TestCase):
             "citit sub numele pe care îl declară contractul.",
         )
 
+    def test_loop_keeps_its_cadence_when_the_server_sends_an_unusable_value(self) -> None:
+        """
+        Perechea testului de mai sus: ce *nu* are voie să devină cadență.
+
+        Membrul interesant al listei este True. bool e subclasă de int, deci o
+        verificare scrisă doar cu isinstance(..., (int, float)) îl acceptă, iar
+        stop_event.wait(timeout=True) așteaptă o secundă — de zece ori cadența
+        intenționată, simultan pe tot parcul de agenți. Restul valorilor sunt
+        deja respinse azi; sunt aici ca să fixeze întregul contract al câmpului,
+        nu doar cazul care a fost spart.
+
+        nan e singura valoare numerică ce ar trece de o verificare de tip și ar
+        rupe și comparația `next_interval != current_interval`, care în cazul lui
+        este adevărată față de orice — inclusiv față de el însuși.
+        """
+        local_interval = 10
+
+        for unusable in (True, False, 0, -5, "30", None, float("nan")):
+            with self.subTest(next_heartbeat_seconds=unusable):
+                stop_event = _RecordingStopEvent()
+
+                def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+                    stop_event.set()
+                    return {
+                        "status": "ok",
+                        "agent_id": agent_id,
+                        DIRECTIVE_FIELD: {DIRECTIVE_ACTION_FIELD: "none"},
+                        NEXT_INTERVAL_FIELD: unusable,
+                    }
+
+                with _loop_isolated_from_the_network(fake_send_heartbeat):
+                    agent.heartbeat_loop(
+                        config=_make_config(),
+                        server_url="http://127.0.0.1:8000",
+                        system_info={},
+                        heartbeat_interval_seconds=local_interval,
+                        stop_event=stop_event,
+                    )
+
+                self.assertEqual(
+                    stop_event.wait_timeouts,
+                    [local_interval],
+                    f"Agentul a adoptat {unusable!r} ca interval de heartbeat.",
+                )
+
 
 class HeartbeatLoopReregistrationTests(unittest.TestCase):
     """
