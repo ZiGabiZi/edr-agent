@@ -129,8 +129,85 @@ def _refuse_network_call(name: str):
     return refuse
 
 
+# După cât timp este considerată blocată o rulare de heartbeat_loop dintr-un
+# test. Nu este o măsură a cât durează testele — toate se termină în
+# milisecunde — ci pragul de la care singura explicație rămasă este că bucla nu
+# mai are cum să iasă singură.
+_LOOP_WATCHDOG_SECONDS = 5.0
+
+
+class _LoopWatchdog:
+    """
+    Oprește forțat heartbeat_loop atunci când testul nu mai reușește să o oprească.
+
+    De ce există:
+        Fiecare test de buclă își programează singur ieșirea din interiorul
+        dublului de send_heartbeat: la a n-a apelare, dublul setează stop_event.
+        Condiția aceea depinde însă chiar de comportamentul aflat sub test, deci
+        o regresie o poate face să nu se împlinească niciodată — un `continue`
+        strecurat înaintea lui send_heartbeat, o gardă care suprimă trimiterile
+        cât timp agentul e degradat, o excepție nouă prinsă mai sus. Atunci
+        nimeni nu mai setează stop_event, iar `while not stop_event.is_set()` se
+        învârte la nesfârșit: suita nu eșuează, ci atârnă până la timeout-ul de
+        CI sau până la Ctrl+C.
+
+        Un defect care se manifestă ca blocaj este cel mai scump mod de a afla
+        ceva: nu are mesaj, nu are stack trace și nu spune nici măcar ce test
+        l-a provocat. Cronometrul de aici îl transformă într-un eșec obișnuit,
+        cu explicație.
+
+    De ce cronometru și nu un plafon de apeluri în dublu:
+        Un contor pus în fake_send_heartbeat ar prinde doar bucla care trimite
+        prea des. Regresia inversă — bucla care nu mai trimite deloc — nu ar
+        ajunge niciodată să atingă contorul, adică exact cazul care produce
+        blocajul. Cronometrul le acoperă pe amândouă, pentru că măsoară singurul
+        lucru comun: faptul că bucla nu s-a mai oprit.
+
+    Cum ajunge oprirea la buclă:
+        heartbeat_loop nu doarme cu time.sleep(), ci cu stop_event.wait(timeout),
+        deci un set() venit din alt fir o trezește imediat, oricât de mare ar fi
+        intervalul cerut. Aceeași proprietate care face agentul să răspundă la
+        Ctrl+C în mijlocul unei pauze de 300 de secunde face și plasa asta să
+        funcționeze.
+    """
+
+    def __init__(self, stop_event, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.fired = False
+        self._stop_event = stop_event
+        self._timer = threading.Timer(timeout_seconds, self._fire)
+        # Fir daemon: dacă totuși rămâne în urmă, nu ține procesul de teste în
+        # viață după ce raportul a fost scris.
+        self._timer.daemon = True
+
+    def _fire(self) -> None:
+        self.fired = True
+        self._stop_event.set()
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def cancel(self) -> None:
+        """Oprirea cronometrului e idempotentă: cancel() după declanșare nu face nimic."""
+        self._timer.cancel()
+
+    def failure_message(self) -> str:
+        return (
+            f"heartbeat_loop nu s-a oprit singură în {self.timeout_seconds:g}s și a "
+            "fost oprită forțat de plasa de siguranță a testului. Bucla nu a mai "
+            "ajuns la condiția care setează stop_event: cel mai probabil nu mai "
+            "apelează send_heartbeat pe calea verificată aici, sau îl apelează de "
+            "mai multe ori decât se aștepta dublul. Fără această plasă, testul ar "
+            "fi atârnat până la timeout-ul de CI, fără niciun mesaj."
+        )
+
+
 @contextmanager
-def _loop_isolated_from_the_network(fake_send_heartbeat):
+def _loop_isolated_from_the_network(
+    fake_send_heartbeat,
+    stop_event,
+    watchdog_seconds: float = _LOOP_WATCHDOG_SECONDS,
+):
     """
     Rulează heartbeat_loop cu un singur punct de contact fals: send_heartbeat.
 
@@ -148,19 +225,46 @@ def _loop_isolated_from_the_network(fake_send_heartbeat):
         În ambele cazuri rezultatul testului ar depinde de ce rulează pe mașina
         celui care îl execută. Sigilarea îl face să eșueze imediat, cu motivul
         scris în mesaj, în loc să atârne sau să atingă un server real.
+
+    De ce cere și stop_event:
+        Ca plasa de siguranță (_LoopWatchdog) să nu fie opțională. Orice test de
+        buclă trece oricum prin harness-ul acesta ca să nu iasă în rețea, deci
+        primind aici evenimentul de oprire capătă și cronometrul, fără să ceară
+        nimic. Un test nou nu are cum să uite să și-l pună.
     """
-    with ExitStack() as patches:
-        patches.enter_context(
-            patch.object(agent, "send_heartbeat", fake_send_heartbeat)
-        )
-        patches.enter_context(patch.object(agent, "logger"))
+    watchdog = _LoopWatchdog(stop_event, watchdog_seconds)
 
-        for name in _TRANSPORT_ENTRY_POINTS:
+    try:
+        with ExitStack() as patches:
             patches.enter_context(
-                patch.object(agent, name, _refuse_network_call(name))
+                patch.object(agent, "send_heartbeat", fake_send_heartbeat)
             )
+            patches.enter_context(patch.object(agent, "logger"))
 
-        yield
+            for name in _TRANSPORT_ENTRY_POINTS:
+                patches.enter_context(
+                    patch.object(agent, name, _refuse_network_call(name))
+                )
+
+            watchdog.start()
+            yield
+    except AssertionError as observed_failure:
+        # Testele de aici își țin aserțiile *după* blocul `with`, deci verificarea
+        # de mai jos apucă să vorbească prima. Ramura aceasta acoperă testul
+        # scris în cealaltă ordine, cu verificările înăuntru: acolo o buclă
+        # oprită forțat s-ar vedea mai întâi ca listă prea scurtă
+        # ("[1, 2] != [1, 2, 3]"), adică simptomul, iar cauza s-ar pierde. Cauza
+        # trece în față, cu eșecul observat atașat drept cauză a ei.
+        if watchdog.fired:
+            raise AssertionError(watchdog.failure_message()) from observed_failure
+        raise
+    finally:
+        watchdog.cancel()
+
+    # Verificarea nu stă în `finally`: dacă testul a eșuat oricum din alt motiv,
+    # acel eșec are prioritate și nu are voie să fie înlocuit de al nostru.
+    if watchdog.fired:
+        raise AssertionError(watchdog.failure_message())
 
 
 
@@ -189,7 +293,7 @@ class HeartbeatLoopSequenceTests(unittest.TestCase):
 
             return {"status": "ok", "directive": {"action": "none"}}
 
-        with _loop_isolated_from_the_network(fake_send_heartbeat):
+        with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event):
             agent.heartbeat_loop(
                 config=_make_config(),
                 server_url="http://127.0.0.1:8000",
@@ -339,7 +443,7 @@ class HeartbeatResponseContractTests(unittest.TestCase):
                 NEXT_INTERVAL_FIELD: server_dictated_interval,
             }
 
-        with _loop_isolated_from_the_network(fake_send_heartbeat):
+        with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event):
             agent.heartbeat_loop(
                 config=_make_config(),
                 server_url="http://127.0.0.1:8000",
@@ -385,7 +489,7 @@ class HeartbeatResponseContractTests(unittest.TestCase):
                         NEXT_INTERVAL_FIELD: unusable,
                     }
 
-                with _loop_isolated_from_the_network(fake_send_heartbeat):
+                with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event):
                     agent.heartbeat_loop(
                         config=_make_config(),
                         server_url="http://127.0.0.1:8000",
@@ -467,7 +571,7 @@ class HeartbeatLoopReregistrationTests(unittest.TestCase):
         # register_agent_with_retry este înlocuit deliberat: harness-ul sigilează
         # check_server_health și register_agent, iar aici calea de re-înregistrare
         # este chiar subiectul testului, nu ceva de traversat până la rețea.
-        with _loop_isolated_from_the_network(fake_send_heartbeat), \
+        with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event), \
                 patch.object(agent, "register_agent_with_retry", return_value=True):
             agent.heartbeat_loop(
                 config=_make_config(),
