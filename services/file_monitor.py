@@ -5,7 +5,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Dict, FrozenSet, Iterable, Optional
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional
 from uuid import uuid4
 
 from watchdog.events import FileMovedEvent, FileSystemEvent, FileSystemEventHandler
@@ -47,9 +47,29 @@ def build_file_event_payload(
     event_type: str,
     file_path: str,
     agent_instance_id: str,
-) -> Dict[str, str]:
-    """Construiește payload-ul unui eveniment de fișier."""
+    occurred_at: Optional[str] = None,
+    settle_wait_ms: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Construiește payload-ul unui eveniment de fișier.
+
+    occurred_at este momentul PRIMEI observații a fișierului, furnizat de
+    SettleTracker (Decizia 1). Trebuie transmis explicit tocmai pentru că
+    raportarea are loc cu întârziere, după stabilizare: calculat aici, ar fi
+    momentul emiterii, nu al faptului, iar serverul ar ordona evenimentele
+    greșit — exact eroarea pe care câmpul occurred_at a fost introdus s-o
+    prevină (vezi nota din contracts/wire-contract.json).
+
+    Rămâne opțional pentru compatibilitate cu apelurile care nu trec încă prin
+    tracker; absent, se folosește ceasul de acum.
+
+    settle_wait_ms, când este prezent, călătorește sub measurements — model
+    separat structural tocmai ca să nu se amestece cu câmpurile care descriu
+    fișierul. Niciun câmp de acolo nu are voie să intre într-o decizie de
+    verdict sau de escaladare.
+    """
     current_time = datetime.now(timezone.utc).isoformat()
+    event_time = occurred_at or current_time
     normalized_path = normalize_file_path(file_path)
 
     descriptions = {
@@ -59,15 +79,20 @@ def build_file_event_payload(
 
     description = descriptions.get(event_type, "File system event detected")
 
-    return {
+    payload: Dict[str, Any] = {
         "client_event_id": str(uuid4()),
         "agent_id": agent_id,
         "agent_instance_id": agent_instance_id,
         "event_type": event_type,
-        "occurred_at": current_time,
+        "occurred_at": event_time,
         "file_path": normalized_path,
-        "description": f"{description} at {current_time}",
+        "description": f"{description} at {event_time}",
     }
+
+    if settle_wait_ms is not None:
+        payload["measurements"] = {"settle_wait_ms": settle_wait_ms}
+
+    return payload
 
 
 class EventDebouncer:
