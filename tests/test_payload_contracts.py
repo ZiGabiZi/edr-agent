@@ -27,7 +27,12 @@ import unittest
 from watchdog.events import FileCreatedEvent
 
 import agent
-from services.file_monitor import EDRFileEventHandler, build_file_event_payload
+from services.file_monitor import (
+    EDRFileEventHandler,
+    SettleReleaser,
+    build_file_event_payload,
+)
+from services.settle_tracker import SettleTracker
 from tests.wire_contract import (
     CONTRACT,
     declared_fields,
@@ -90,6 +95,22 @@ def _all_builder_cases() -> list:
         (
             "build_file_event_payload",
             build_file_event_payload("agent-test", "file_created", "C:/tmp/proba.txt", config["agent_instance_id"]),
+            "event_create_request",
+        ),
+        (
+            # Același builder, pe drumul tracker-ului: cu occurred_at explicit
+            # și cu measurements. Fără acest caz, testele generice verifică
+            # doar apelul cu argumente implicite, unde measurements nici nu
+            # apare — deci cheia ar putea scăpa nedeclarată în contract.
+            "build_file_event_payload[settled]",
+            build_file_event_payload(
+                "agent-test",
+                "file_created",
+                "C:/tmp/proba.txt",
+                config["agent_instance_id"],
+                occurred_at="2026-01-01T00:00:00+00:00",
+                settle_wait_ms=1500,
+            ),
             "event_create_request",
         ),
         (
@@ -302,30 +323,53 @@ class ContractSyncTests(unittest.TestCase):
 
 class FileEventWiringTests(unittest.TestCase):
     """
-    Între builder și watchdog stau două constructoare. Testul de contract
-    verifică funcția izolat, deci un handler care uită să paseze incarnarea
-    trece neobservat — până la primul eveniment real de fișier, unde nu produce
-    un câmp lipsă, ci un TypeError care omoară thread-ul observer-ului.
+    Între builder și watchdog nu mai stau două constructoare, ci un lanț:
+    handler → tracker → releaser → builder. Testul de contract verifică
+    builder-ul izolat, deci o verigă care uită să paseze incarnarea trece
+    neobservată — până la primul eveniment real de fișier.
+
+    Emiterea este acum asincronă: on_created doar observă, iar payload-ul
+    apare abia când releaser-ul colectează ce s-a stabilizat. Testul parcurge
+    lanțul întreg, cu ceas fals, exact cum îl parcurge un eveniment real.
     """
 
-    def test_the_handler_stamps_events_with_the_running_incarnation(self) -> None:
+    def test_the_pipeline_stamps_events_with_the_running_incarnation(self) -> None:
         captured: list = []
         config = _make_config()
+        fake_time = {"now": 1000.0}
 
+        tracker = SettleTracker(
+            quiet_seconds=1.0,
+            clock=lambda: fake_time["now"],
+            logger=logging.getLogger("test"),
+        )
         handler = EDRFileEventHandler(
+            monitored_directories=["C:/tmp"],
+            tracker=tracker,
+            logger=logging.getLogger("test"),
+        )
+        releaser = SettleReleaser(
+            tracker=tracker,
+            event_callback=captured.append,
             agent_id=config["agent_id"],
             agent_instance_id=config["agent_instance_id"],
-            monitored_directories=["C:/tmp"],
-            event_callback=captured.append,
             logger=logging.getLogger("test"),
         )
 
         handler.on_created(FileCreatedEvent("C:/tmp/proba.txt"))
 
+        # Imediat după observație nu se emite nimic: fișierul nu s-a liniștit.
+        self.assertEqual(releaser.release_due_once(), 0)
+        self.assertEqual(captured, [])
+
+        fake_time["now"] += 1.5
+        self.assertEqual(releaser.release_due_once(), 1)
+
         self.assertEqual(len(captured), 1)
         self.assertEqual(
             captured[0]["agent_instance_id"], config["agent_instance_id"]
         )
+        self.assertIn("measurements", captured[0])
 
 
 if __name__ == "__main__":

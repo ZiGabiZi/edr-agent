@@ -1,29 +1,32 @@
 import logging
 import os
-import time
-from collections import OrderedDict
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
-from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 from watchdog.events import FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from services.settle_tracker import (
+    DEFAULT_MAX_SETTLE_WAIT_SECONDS,
+    DEFAULT_SETTLE_QUIET_SECONDS,
+    PendingFile,
+    SettleTracker,
+)
 
-DEFAULT_EVENT_DEBOUNCE_SECONDS = 2.0
 
 DEFAULT_MONITORED_EXTENSIONS: FrozenSet[str] = frozenset()
 
-_DEBOUNCE_CLEANUP_INTERVAL_SECONDS = 60.0
+# Cât de des verifică firul de eliberare dacă tracker-ul are fișiere gata de
+# raportat. Valoarea adaugă cel mult atâta latență peste perioada de liniște,
+# deci trebuie să fie mică față de quiet_seconds, nu față de ceva absolut.
+DEFAULT_RELEASE_POLL_SECONDS = 0.25
 
-# Plafon dur pentru numărul de evenimente urmărite simultan de debouncer.
-# Curățarea pe bază de timp rulează cel mult o dată la
-# _DEBOUNCE_CLEANUP_INTERVAL_SECONDS, deci nu limitează cu nimic o rafală mai
-# scurtă de atât (dezarhivare, build, copiere recursivă, criptare în masă).
-# Plafonul mărginește vârful de memorie independent de ceas.
-_DEBOUNCE_MAX_TRACKED_EVENTS = 10_000
+# De câte ori se încearcă livrarea unui eveniment către spool înainte de a
+# renunța. Vezi SettleReleaser pentru motivul existenței reîncercărilor.
+_RELEASER_MAX_EMIT_ATTEMPTS = 5
 
 FileEventCallback = Callable[[Dict[str, str]], None]
 
@@ -95,119 +98,35 @@ def build_file_event_payload(
     return payload
 
 
-class EventDebouncer:
-    """
-    Reduce raportarea repetată a aceluiași eveniment într-un interval scurt.
-
-    Unele aplicații și unele sisteme de operare pot genera mai multe evenimente
-    pentru aceeași operație de scriere a unui fișier.
-
-    Memoria este mărginită de două mecanisme independente, care răspund la
-    întrebări diferite:
-      - curățarea periodică (_cleanup_stale_entries) elimină ce a devenit
-        irelevant, cel mult o dată la _DEBOUNCE_CLEANUP_INTERVAL_SECONDS;
-      - plafonul de capacitate (_evict_over_capacity) mărginește câte intrări
-        pot exista simultan, indiferent cât timp a trecut.
-    """
-
-    def __init__(
-        self,
-        interval_seconds: float = DEFAULT_EVENT_DEBOUNCE_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
-        max_tracked_events: int = _DEBOUNCE_MAX_TRACKED_EVENTS,
-    ):
-        self.interval_seconds = interval_seconds
-        self.max_tracked_events = max_tracked_events
-        self._clock = clock
-        # OrderedDict, nu dict: ordinea intrărilor este ordinea ultimei apariții
-        # a fiecărei chei, deci capătul din față este întotdeauna candidatul
-        # corect pentru evicțiune.
-        self._last_seen: "OrderedDict[str, float]" = OrderedDict()
-        self._last_cleanup_time = 0.0
-        self._lock = Lock()
-
-    def _cleanup_stale_entries(self, current_time: float) -> None:
-        """Curăță intrările vechi din dicționarul de evenimente văzute recent.
-           Această metodă este apelată periodic pentru a preveni creșterea necontrolată a memoriei.
-        """
-        if (current_time - self._last_cleanup_time) < _DEBOUNCE_CLEANUP_INTERVAL_SECONDS:
-            return
-
-        
-        
-        cutoff = current_time - self.interval_seconds * 2
-
-        # Comprehensiunea păstrează ordinea intrărilor rămase, deci ordinea
-        # folosită de _evict_over_capacity supraviețuiește curățării.
-        self._last_seen = OrderedDict(
-            (key, timestamp)
-            for key, timestamp in self._last_seen.items()
-            if timestamp > cutoff
-        )
-        self._last_cleanup_time = current_time
-
-    def _evict_over_capacity(self) -> None:
-        """Menține numărul de intrări sub plafon, eliminându-le pe cele mai vechi.
-
-        Spre deosebire de curățarea periodică, nu se uită la ceas: mărginește
-        vârful de memorie și în interiorul unei rafale mai scurte decât
-        intervalul de curățare, unde garda de timp nu intervine deloc.
-
-        Compromisul este acceptat conștient: o cheie evacuată înainte de
-        expirarea ferestrei de debounce va fi văzută din nou ca eveniment nou,
-        deci se poate raporta un duplicat. Un duplicat ocazional sub presiune
-        extremă este preferabil unei creșteri nemărginite a memoriei pe
-        endpoint.
-        """
-        while len(self._last_seen) > self.max_tracked_events:
-            self._last_seen.popitem(last=False)
-
-    def is_duplicate(self, event_type: str, file_path: str) -> bool:
-        """Returnează True dacă evenimentul a fost observat recent."""
-        event_key = f"{event_type}:{os.path.normcase(normalize_file_path(file_path))}"
-        current_time = self._clock()
-
-        with self._lock:
-            self._cleanup_stale_entries(current_time)
-            previous_time = self._last_seen.get(event_key)
-            self._last_seen[event_key] = current_time
-            # Reatribuirea unei chei existente nu îi schimbă poziția, deci
-            # mutarea la capăt este necesară ca ordinea să rămână „ultima
-            # apariție", nu „prima apariție".
-            self._last_seen.move_to_end(event_key)
-            self._evict_over_capacity()
-
-        if previous_time is None:
-            return False
-
-        return (current_time - previous_time) < self.interval_seconds
-
-
 class EDRFileEventHandler(FileSystemEventHandler):
-    """Procesează evenimentele de fișier detectate de watchdog."""
+    """
+    Filtrează evenimentele watchdog și le predă tracker-ului de stabilizare.
+
+    Handler-ul nu mai construiește payload-uri și nu mai apelează callback-ul
+    de raportare: rulează pe firul observer-ului watchdog, unde orice lucru
+    care poate dura sau eșua este interzis. Singura lui treabă este să decidă
+    dacă evenimentul este relevant și, dacă da, să-l observe în tracker —
+    operație de memorie, fără I/O, care revine imediat.
+
+    Emiterea efectivă aparține lui SettleReleaser, pe firul lui propriu.
+    """
 
     def __init__(
         self,
-        agent_id: str,
-        agent_instance_id: str,
         monitored_directories: Iterable[str],
-        event_callback: FileEventCallback,
+        tracker: SettleTracker,
         logger: logging.Logger,
         monitored_extensions: FrozenSet[str] = DEFAULT_MONITORED_EXTENSIONS,
-        debounce_seconds: float = DEFAULT_EVENT_DEBOUNCE_SECONDS,
     ):
         super().__init__()
 
-        self.agent_id = agent_id
-        self.agent_instance_id = agent_instance_id
         self.monitored_directories = tuple(
             normalize_file_path(directory)
             for directory in monitored_directories
             )
-        self.event_callback = event_callback
+        self.tracker = tracker
         self.logger = logger
         self.monitored_extensions = monitored_extensions
-        self.debouncer = EventDebouncer(debounce_seconds)
 
 
     def _is_in_monitored_directory(self, file_path: str) -> bool:
@@ -268,7 +187,7 @@ class EDRFileEventHandler(FileSystemEventHandler):
         event_type: str,
     ) -> None:
         
-        """Filtrează și raportează un eveniment relevant de fișier."""
+        """Filtrează un eveniment de fișier și îl predă tracker-ului."""
 
         normalized_path = normalize_file_path(file_path)
         if not self._is_relevant_file(normalized_path):
@@ -278,40 +197,231 @@ class EDRFileEventHandler(FileSystemEventHandler):
                 normalized_path,
             )
             return
-        
-
-
-        if self.debouncer.is_duplicate(event_type, normalized_path):
-            self.logger.debug(
-                "Ignored duplicate %s event for file: %s",
-                event_type,
-                normalized_path,
-            )
-            return
-
-        payload = build_file_event_payload(
-            agent_id=self.agent_id,
-            agent_instance_id=self.agent_instance_id,
-            event_type=event_type,
-            file_path=normalized_path,
-        )
 
         try:
-            self.event_callback(payload)
-            self.logger.info(
-                "Detected and reported %s event for file: %s",
-                event_type,
-                normalized_path,
-            )
+            self.tracker.observe(normalized_path, event_type)
         except Exception as error:
-            # Monitorizarea nu trebuie să se oprească doar pentru că raportarea
-            # unui eveniment a eșuat temporar.
+            # observe() nu face I/O, deci în practică nu are cum să eșueze.
+            # Garda rămâne totuși: o excepție scăpată aici omoară firul
+            # observer-ului watchdog, iar monitorizarea moare fără niciun semn
+            # exterior. Prețul unei gărzi inutile este zero; prețul absenței ei
+            # este orbire tăcută.
             self.logger.warning(
-                "Could not report %s event for file %s: %s",
+                "Could not track %s event for file %s: %s",
                 event_type,
                 normalized_path,
                 error,
             )
+
+
+class SettleReleaser:
+    """
+    Golește periodic tracker-ul și emite evenimentele devenite gata.
+
+    Rulează pe un fir propriu, deținut de FileMonitor. Bucla consultă
+    SettleTracker.due() la fiecare poll_seconds, construiește payload-ul
+    fiecărui fișier eliberat și îl predă callback-ului de raportare (în
+    producție: spool-ul de evenimente).
+
+    De ce există reîncercările — și de ce nu existau înainte
+    ------------------------------------------------------
+    În vechiul flux, callback-ul era apelat direct de pe firul watchdog, iar un
+    eșec era recuperabil de la sine: următoarea scriere în fișier regenera
+    evenimentul. due() însă SCOATE intrarea din tracker; fișierul s-a liniștit,
+    deci niciun eveniment watchdog nu-l va mai reînvia. Același eșec de
+    callback, dintr-o pierdere temporară, devine pierdere definitivă. De aceea
+    un payload care nu a putut fi predat se reține și se reîncearcă la
+    trecerile următoare.
+
+    Payload-ul se construiește O SINGURĂ DATĂ, la prima încercare, și se
+    reține ca atare între reîncercări: client_event_id rămâne astfel stabil,
+    iar deduplicarea de pe server (semantica at-least-once a spool-ului)
+    rămâne validă chiar dacă o încercare a apucat să producă efecte parțiale.
+
+    După max_emit_attempts eșecuri consecutive, evenimentul se abandonează cu
+    un log de nivel ERROR (Decizia 2): un disc plin sau un spool corupt nu
+    trebuie să blocheze coada la nesfârșit, dar nici să treacă neobservat.
+
+    Starea de reîncercare (_retry) este atinsă exclusiv de pe firul releaser-ului
+    (bucla run() și drenarea de la oprire rulează pe același fir), deci nu are
+    nevoie de lacăt. Testele apelează release_due_once() direct, fără fir.
+    """
+
+    def __init__(
+        self,
+        tracker: SettleTracker,
+        event_callback: FileEventCallback,
+        agent_id: str,
+        agent_instance_id: str,
+        logger: logging.Logger,
+        poll_seconds: float = DEFAULT_RELEASE_POLL_SECONDS,
+        max_emit_attempts: int = _RELEASER_MAX_EMIT_ATTEMPTS,
+    ):
+        self.tracker = tracker
+        self.event_callback = event_callback
+        self.agent_id = agent_id
+        self.agent_instance_id = agent_instance_id
+        self.logger = logger
+        self.poll_seconds = poll_seconds
+        self.max_emit_attempts = max_emit_attempts
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+        # Payload-uri care au eșuat la livrare, cu numărul de încercări
+        # consumate. Listă simplă, fără lacăt — vezi docstring-ul clasei.
+        self._retry: List[Tuple[Dict[str, Any], int]] = []
+
+    def start(self) -> None:
+        """Pornește firul de eliberare."""
+        if self._thread is not None:
+            self.logger.warning("Settle releaser is already running.")
+            return
+
+        self._thread = threading.Thread(
+            target=self.run,
+            name="settle-releaser",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def run(self) -> None:
+        """
+        Bucla firului: o trecere la fiecare poll_seconds, până la semnalul de
+        oprire, apoi drenarea finală.
+
+        Fiecare trecere este împachetată într-o gardă: garanția tracker-ului
+        („orice intrare iese în cel mult max_wait_seconds") este adevărată doar
+        cât timp cineva apelează due(). Dacă firul ar muri dintr-o excepție
+        neprevăzută, tracker-ul s-ar umple în tăcere și monitorizarea ar orbi
+        fără niciun semn exterior — un mod de eșec pe care vechiul flux, rulând
+        pe firul watchdog, nu îl avea.
+        """
+        while not self._stop_event.wait(self.poll_seconds):
+            try:
+                self.release_due_once()
+            except Exception:
+                self.logger.exception(
+                    "Settle release pass failed; the loop continues."
+                )
+
+        try:
+            self.drain_for_shutdown()
+        except Exception:
+            self.logger.exception("Settle shutdown drain failed.")
+
+    def stop(self) -> None:
+        """
+        Semnalează oprirea. Drenarea finală rulează pe firul releaser-ului,
+        după ieșirea din buclă — apelantul trebuie să cheme apoi join().
+
+        Ordinea corectă aparține lui FileMonitor.join(): observer-ul watchdog
+        trebuie oprit ȘI așteptat înainte de acest apel, altfel evenimente
+        sosite după drenare ar intra într-un tracker pe care nimeni nu-l mai
+        golește.
+        """
+        self._stop_event.set()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        """Așteaptă terminarea firului, inclusiv drenarea finală."""
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def release_due_once(self) -> int:
+        """
+        Corpul unei treceri: întâi reîncercările, apoi ce a devenit gata.
+
+        Reîncercările au prioritate pentru că au așteptat deja cel puțin o
+        trecere întreagă. Metoda este publică și apelabilă direct din teste,
+        cu ceas fals în tracker — firul nu este necesar pentru corectitudine,
+        doar pentru cadență.
+
+        Returnează numărul de evenimente predate cu succes.
+        """
+        emitted = 0
+
+        pending_retries = self._retry
+        self._retry = []
+        for payload, attempts in pending_retries:
+            emitted += self._emit(payload, attempts)
+
+        for pending in self.tracker.due():
+            emitted += self._emit(self._build_payload(pending), 0)
+
+        return emitted
+
+    def drain_for_shutdown(self) -> int:
+        """
+        Ultima acțiune a firului: golește tot ce a rămas, cu o singură șansă.
+
+        La oprire nu mai există „treceri următoare", deci semantica
+        reîncercărilor nu mai are sens: fiecare payload — reîncercare veche sau
+        intrare proaspăt eliberată de flush() — primește exact o încercare,
+        iar eșecul se raportează direct la nivel ERROR. Tehnic, asta înseamnă
+        a intra în _emit cu contorul deja la max_emit_attempts - 1.
+        """
+        emitted = 0
+
+        pending_retries = self._retry
+        self._retry = []
+        for payload, _ in pending_retries:
+            emitted += self._emit(payload, self.max_emit_attempts - 1)
+
+        for pending in self.tracker.flush():
+            emitted += self._emit(
+                self._build_payload(pending), self.max_emit_attempts - 1
+            )
+
+        return emitted
+
+    def _build_payload(self, pending: PendingFile) -> Dict[str, Any]:
+        return build_file_event_payload(
+            agent_id=self.agent_id,
+            event_type=pending.event_type,
+            file_path=pending.path,
+            agent_instance_id=self.agent_instance_id,
+            occurred_at=pending.occurred_at,
+            settle_wait_ms=pending.settle_wait_ms,
+        )
+
+    def _emit(self, payload: Dict[str, Any], attempts_so_far: int) -> int:
+        """
+        O încercare de livrare. La eșec, reține payload-ul pentru trecerea
+        următoare sau, la epuizarea încercărilor, îl abandonează cu ERROR.
+        """
+        try:
+            self.event_callback(payload)
+        except Exception as error:
+            attempts = attempts_so_far + 1
+
+            if attempts >= self.max_emit_attempts:
+                self.logger.error(
+                    "Dropping %s event for file %s after %d failed delivery "
+                    "attempts: %s",
+                    payload.get("event_type"),
+                    payload.get("file_path"),
+                    attempts,
+                    error,
+                )
+            else:
+                self._retry.append((payload, attempts))
+                self.logger.warning(
+                    "Could not report %s event for file %s "
+                    "(attempt %d of %d), will retry: %s",
+                    payload.get("event_type"),
+                    payload.get("file_path"),
+                    attempts,
+                    self.max_emit_attempts,
+                    error,
+                )
+            return 0
+
+        self.logger.info(
+            "Detected and reported %s event for file: %s",
+            payload.get("event_type"),
+            payload.get("file_path"),
+        )
+        return 1
 
 
 class FileMonitor:
@@ -320,6 +430,11 @@ class FileMonitor:
 
     Monitorizarea poate fi recursivă și funcționează prin biblioteca watchdog,
     compatibilă cu Windows, Linux și macOS.
+
+    Deține trei piese și le leagă:
+      - observer-ul watchdog, care produce observații brute;
+      - SettleTracker, care decide când un fișier a încetat să se schimbe;
+      - SettleReleaser, pe fir propriu, care emite ce a devenit gata.
     """
 
     def __init__(
@@ -331,7 +446,9 @@ class FileMonitor:
         event_callback: FileEventCallback,
         logger: Optional[logging.Logger] = None,
         monitored_extensions: FrozenSet[str] = DEFAULT_MONITORED_EXTENSIONS,
-        debounce_seconds: float = DEFAULT_EVENT_DEBOUNCE_SECONDS,
+        quiet_seconds: float = DEFAULT_SETTLE_QUIET_SECONDS,
+        max_wait_seconds: float = DEFAULT_MAX_SETTLE_WAIT_SECONDS,
+        release_poll_seconds: float = DEFAULT_RELEASE_POLL_SECONDS,
     ):
         self.agent_id = agent_id
         self.agent_instance_id = agent_instance_id
@@ -339,15 +456,27 @@ class FileMonitor:
         self.recursive_monitoring = recursive_monitoring
         self.logger = logger or logging.getLogger(__name__)
 
-        self.observer = Observer()
-        self.handler = EDRFileEventHandler(
+        self.tracker = SettleTracker(
+            quiet_seconds=quiet_seconds,
+            max_wait_seconds=max_wait_seconds,
+            logger=self.logger,
+        )
+
+        self.releaser = SettleReleaser(
+            tracker=self.tracker,
+            event_callback=event_callback,
             agent_id=agent_id,
             agent_instance_id=agent_instance_id,
+            logger=self.logger,
+            poll_seconds=release_poll_seconds,
+        )
+
+        self.observer = Observer()
+        self.handler = EDRFileEventHandler(
             monitored_directories=self.monitored_directories,
-            event_callback=event_callback,
+            tracker=self.tracker,
             logger=self.logger,
             monitored_extensions=monitored_extensions,
-            debounce_seconds=debounce_seconds,
         )
 
         self._started = False
@@ -358,6 +487,10 @@ class FileMonitor:
 
         Directoarele inexistente sunt ignorate și raportate în log.
         Agentul nu creează automat directoare arbitrare din configurație.
+
+        Firul de eliberare pornește doar dacă observer-ul a pornit: fără
+        observații nu are ce elibera, iar un fir orfan care se rotește peste un
+        tracker mereu gol ar fi doar zgomot.
         """
 
         if self._started:
@@ -403,6 +536,7 @@ class FileMonitor:
             )
 
         self.observer.start()
+        self.releaser.start()
         self._started = True
 
         self.logger.info(
@@ -411,15 +545,39 @@ class FileMonitor:
         )
 
     def stop(self) -> None:
-        """Oprește monitorizarea directoarelor."""
+        """
+        Oprește observer-ul watchdog. Deliberat, NU oprește releaser-ul.
+
+        Ordinea la oprire nu este negociabilă: releaser-ul trebuie semnalizat
+        abia după ce observer-ul a fost oprit ȘI așteptat (în join()), altfel
+        observații sosite între drenarea finală și moartea observer-ului ar
+        intra într-un tracker pe care nimeni nu-l mai golește — pierdute fără
+        nicio urmă. Secvența completă trăiește în join().
+        """
         if self._started:
             self.logger.info("Stopping file monitoring...")
             self.observer.stop()
 
     def join(self, timeout: Optional[float] = None) -> None:
-        """Așteaptă oprirea completă a thread-ului watchdog."""
-        if self._started:
-            self.observer.join(timeout=timeout)
+        """
+        Așteaptă oprirea completă, în ordinea care nu pierde evenimente:
+
+          1. observer-ul watchdog se termină — nu mai pot sosi observații;
+          2. releaser-ul primește semnalul de oprire, iar ultima lui acțiune,
+             pe firul lui, este drenarea: tracker.flush() plus emiterea a tot
+             ce a ieșit;
+          3. se așteaptă firul releaser-ului.
+
+        Abia la final _started devine fals: monitorul este „pornit" până când
+        ultima lui piesă s-a oprit de tot, nu până când prima a primit semnalul.
+        """
+        if not self._started:
+            return
+
+        self.observer.join(timeout=timeout)
+        self.releaser.stop()
+        self.releaser.join(timeout=timeout)
+        self._started = False
 
     def is_running(self) -> bool:
         """Returnează dacă observer-ul de monitorizare este activ."""
