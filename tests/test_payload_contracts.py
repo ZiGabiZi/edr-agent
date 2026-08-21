@@ -22,11 +22,14 @@ De ce există acest fișier:
 """
 
 import logging
+import os
+import tempfile
 import unittest
 
 from watchdog.events import FileCreatedEvent
 
 import agent
+from services.file_hasher import FileHasher
 from services.file_monitor import (
     EDRFileEventHandler,
     SettleReleaser,
@@ -278,8 +281,8 @@ class ContractSyncTests(unittest.TestCase):
 
         if peer_repo is None:
             self.skipTest(
-                "edr-server nu a fost găsit lângă agent; sincronizarea celor două "
-                "exemplare rămâne neverificată în această rulare. Setează "
+                "edr-server nu a fost gasit langa agent; sincronizarea celor doua "
+                "exemplare ramane neverificata in aceasta rulare. Seteaza "
                 "EDR_SERVER_PATH pentru a o verifica."
             )
 
@@ -323,14 +326,15 @@ class ContractSyncTests(unittest.TestCase):
 
 class FileEventWiringTests(unittest.TestCase):
     """
-    Între builder și watchdog nu mai stau două constructoare, ci un lanț:
-    handler → tracker → releaser → builder. Testul de contract verifică
-    builder-ul izolat, deci o verigă care uită să paseze incarnarea trece
-    neobservată — până la primul eveniment real de fișier.
+    Între builder și watchdog nu mai stau două constructoare, ci un lanț cu trei
+    etaje: handler → tracker → releaser → hasher → builder. Testul de contract
+    verifică builder-ul izolat, deci o verigă care uită să paseze incarnarea
+    trece neobservată — până la primul eveniment real de fișier.
 
-    Emiterea este acum asincronă: on_created doar observă, iar payload-ul
-    apare abia când releaser-ul colectează ce s-a stabilizat. Testul parcurge
-    lanțul întreg, cu ceas fals, exact cum îl parcurge un eveniment real.
+    Emiterea este asincronă și trece prin hashing: on_created doar observă, iar
+    payload-ul apare abia după ce fișierul s-a stabilizat ȘI a fost citit.
+    Testul parcurge lanțul întreg, cu ceas fals și fișier real, exact cum îl
+    parcurge un eveniment de producție.
     """
 
     def test_the_pipeline_stamps_events_with_the_running_incarnation(self) -> None:
@@ -343,6 +347,13 @@ class FileEventWiringTests(unittest.TestCase):
             clock=lambda: fake_time["now"],
             logger=logging.getLogger("test"),
         )
+        hasher = FileHasher(
+            tracker=tracker,
+            event_callback=captured.append,
+            agent_id=config["agent_id"],
+            agent_instance_id=config["agent_instance_id"],
+            logger=logging.getLogger("test"),
+        )
         handler = EDRFileEventHandler(
             monitored_directories=["C:/tmp"],
             tracker=tracker,
@@ -350,26 +361,36 @@ class FileEventWiringTests(unittest.TestCase):
         )
         releaser = SettleReleaser(
             tracker=tracker,
-            event_callback=captured.append,
-            agent_id=config["agent_id"],
-            agent_instance_id=config["agent_instance_id"],
+            hasher=hasher,
             logger=logging.getLogger("test"),
         )
 
-        handler.on_created(FileCreatedEvent("C:/tmp/proba.txt"))
+        with tempfile.TemporaryDirectory() as directory:
+            file_path = os.path.join(directory, "proba.txt")
+            with open(file_path, "wb") as handle:
+                handle.write(b"continut de proba")
 
-        # Imediat după observație nu se emite nimic: fișierul nu s-a liniștit.
-        self.assertEqual(releaser.release_due_once(), 0)
-        self.assertEqual(captured, [])
+            handler.on_created(FileCreatedEvent(file_path))
 
-        fake_time["now"] += 1.5
-        self.assertEqual(releaser.release_due_once(), 1)
+            # Imediat după observație nu se predă nimic: fișierul nu s-a liniștit.
+            self.assertEqual(releaser.release_due_once(), 0)
+            self.assertEqual(captured, [])
+
+            fake_time["now"] += 1.5
+            self.assertEqual(releaser.release_due_once(), 1)
+
+            # Predat hasher-ului, dar încă neemis: hashing-ul e etajul următor.
+            self.assertEqual(captured, [])
+            self.assertEqual(hasher.process_once(), 1)
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(
             captured[0]["agent_instance_id"], config["agent_instance_id"]
         )
-        self.assertIn("measurements", captured[0])
+        self.assertEqual(captured[0]["hash_status"], "ok")
+        self.assertIn("sha256", captured[0])
+        self.assertIn("settle_wait_ms", captured[0]["measurements"])
+        self.assertIn("hash_duration_ms", captured[0]["measurements"])
 
 
 if __name__ == "__main__":

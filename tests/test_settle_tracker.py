@@ -5,6 +5,7 @@ Mecanismul este pură logică de timp, cu ceasuri injectate: niciun test nu
 atinge discul și niciunul nu așteaptă timp real.
 """
 
+import logging
 import os
 import unittest
 
@@ -327,6 +328,211 @@ class BuildFileEventPayloadTests(unittest.TestCase):
         )
 
         self.assertNotIn("measurements", payload)
+
+
+class ReintroductionTests(unittest.TestCase):
+    """
+    Calea care se execută în producție, și care până acum nu era atinsă de
+    niciun test: reintroducerea peste o intrare care există DEJA, pentru că
+    watchdog a raportat o scriere cât hasher-ul citea.
+
+    Aceeași scriere fizică e și cauza eșecului verificării duble, și cauza
+    existenței intrării — deci ramura asta e regula, nu excepția.
+    """
+
+    def _make_tracker(self, quiet_seconds=1.0, max_wait_seconds=60.0):
+        clock = FakeClock()
+        tracker = SettleTracker(
+            quiet_seconds=quiet_seconds,
+            max_wait_seconds=max_wait_seconds,
+            clock=clock,
+            wall_clock=FakeWallClock(),
+            logger=logging.getLogger("test.tracker"),
+        )
+        return tracker, clock
+
+    def _settled(self, tracker, clock, path="C:/tmp/activ.log"):
+        """Observă un fișier și îl duce până la eliberare, ca spre hasher."""
+        tracker.observe(path, "file_created")
+        clock.advance(1.5)
+        released = tracker.due()
+        self.assertEqual(len(released), 1)
+        return released[0]
+
+    def test_a_reintroduced_file_gets_a_fresh_quiet_period(self) -> None:
+        """
+        Bug-ul propriu-zis. Eșecul verificării duble e cea mai proaspătă dovadă
+        că fișierul se schimbă; măsurată de la o dovadă mai veche, liniștea
+        pare deja împlinită și fișierul e reeliberat instantaneu.
+        """
+        tracker, clock = self._make_tracker()
+        pending = self._settled(tracker, clock)
+
+        # Watchdog raportează o scriere cât hasher-ul citește.
+        clock.advance(0.5)
+        tracker.observe(pending.path, "file_modified")
+
+        # Hashing-ul unui fișier mare durează mult mai mult decât quiet_seconds.
+        clock.advance(8.0)
+        tracker.reintroduce(pending)
+
+        self.assertEqual(
+            tracker.due(),
+            [],
+            "Fișierul a fost reeliberat fără nicio secundă de liniște, deși "
+            "agentul tocmai constatase că se schimbă.",
+        )
+
+        clock.advance(1.5)
+        released = tracker.due()
+        self.assertEqual(len(released), 1)
+        self.assertEqual(released[0].reintroduction_count, 1)
+
+    def test_the_ceiling_restarts_with_the_settling_window(self) -> None:
+        """
+        A doua cale de eliberare prematură, independentă de last_seen: un fișier
+        intrat în așteptare acum 55s ar depăși plafonul din prima clipă după
+        reintroducere, oricât de corect ar fi tratat last_seen.
+        """
+        tracker, clock = self._make_tracker(max_wait_seconds=60.0)
+        path = "C:/tmp/mare.iso"
+
+        # Ca să iasă pe calea plafonului, fișierul trebuie să fie scris
+        # CONTINUU: altfel liniștea se împlinește prima, iar forced_reason
+        # rămâne None. Ordinea din due() nu e negociabilă — stabilizarea
+        # naturală are prioritate față de plafon.
+        tracker.observe(path, "file_created")
+        for _ in range(120):
+            clock.advance(0.5)
+            tracker.observe(path, "file_modified")
+
+        with self.assertLogs("test.tracker", level="WARNING"):
+            at_ceiling = tracker.due()
+
+        self.assertEqual(len(at_ceiling), 1)
+        self.assertEqual(at_ceiling[0].forced_reason, "ceiling")
+
+        clock.advance(3.0)  # hasher-ul a citit fișierul
+        tracker.reintroduce(at_ceiling[0])
+
+        self.assertEqual(
+            tracker.due(),
+            [],
+            "Plafonul a eliberat instantaneu intrarea reintrodusă: fereastra "
+            "de stabilizare nu a repornit. Ancorat pe first_seen, un fișier "
+            "intrat în așteptare acum 63s depășește plafonul din prima clipă, "
+            "oricât de corect ar fi tratat last_seen.",
+        )
+
+        # Iar dacă scrierile chiar au încetat, iese pe calea normală — nu
+        # forțat — după perioada de liniște.
+        clock.advance(1.5)
+        released = tracker.due()
+        self.assertEqual(len(released), 1)
+        self.assertIsNone(released[0].forced_reason)
+
+    def test_the_cost_anchor_survives_every_reintroduction(self) -> None:
+        """
+        settling_since repornește, first_seen nu. settle_wait_ms rămâne definit
+        exact ca înainte — costul unei citiri repetate a fost plătit de două ori
+        și trebuie să apară ca atare (contracts/wire-contract.json,
+        models.event_measurements).
+        """
+        tracker, clock = self._make_tracker()
+        pending = self._settled(tracker, clock)
+        original_first_seen = pending.first_seen
+
+        clock.advance(0.5)
+        tracker.observe(pending.path, "file_modified")
+        clock.advance(8.0)
+        tracker.reintroduce(pending)
+
+        clock.advance(1.5)
+        released = tracker.due()[0]
+
+        self.assertEqual(released.first_seen, original_first_seen)
+        self.assertEqual(released.occurred_at, pending.occurred_at)
+        self.assertGreater(released.settling_since, original_first_seen)
+
+        # 1000.0 -> 1011.5: toată latența, nu doar ultima fereastră.
+        self.assertEqual(released.settle_wait_ms, 11500)
+
+    def test_the_event_type_stays_the_one_that_opened_the_entry(self) -> None:
+        """
+        Decizia 1 nu se pierde la merge: intrarea reintrodusă e ACEEAȘI apariție
+        a fișierului, deci poartă tipul și occurred_at ale observației care a
+        deschis-o — nu o pereche amestecată din două momente diferite.
+        """
+        tracker, clock = self._make_tracker()
+        pending = self._settled(tracker, clock)
+
+        clock.advance(0.5)
+        tracker.observe(pending.path, "file_modified")
+        clock.advance(8.0)
+        tracker.reintroduce(pending)
+
+        clock.advance(1.5)
+        released = tracker.due()[0]
+        self.assertEqual(released.event_type, "file_created")
+
+    def test_observations_absorbed_while_hashing_are_not_lost(self) -> None:
+        tracker, clock = self._make_tracker()
+        pending = self._settled(tracker, clock)
+
+        clock.advance(0.5)
+        tracker.observe(pending.path, "file_modified")
+        tracker.observe(pending.path, "file_modified")
+        clock.advance(8.0)
+        tracker.reintroduce(pending)
+
+        clock.advance(1.5)
+        released = tracker.due()[0]
+        self.assertEqual(
+            released.observation_count,
+            pending.observation_count + 2,
+            "Observațiile sosite cât timp hasher-ul citea au fost aruncate.",
+        )
+
+    def test_both_branches_reach_the_same_state(self) -> None:
+        """
+        Asimetria e o problemă în sine, separat de valorile greșite: aceeași
+        situație logică nu are voie să producă două comportamente în funcție de
+        dacă watchdog a apucat sau nu să livreze un eveniment.
+        """
+        results = []
+
+        for watchdog_delivered in (False, True):
+            tracker, clock = self._make_tracker()
+            pending = self._settled(tracker, clock)
+
+            clock.advance(0.5)
+            if watchdog_delivered:
+                tracker.observe(pending.path, "file_modified")
+
+            clock.advance(8.0)
+            tracker.reintroduce(pending)
+
+            self.assertEqual(tracker.due(), [])
+            clock.advance(1.5)
+            entry = tracker.due()[0]
+
+            results.append(
+                (
+                    entry.event_type,
+                    entry.occurred_at,
+                    entry.first_seen,
+                    entry.settling_since,
+                    entry.last_seen,
+                    entry.reintroduction_count,
+                    entry.settle_wait_ms,
+                )
+            )
+
+        self.assertEqual(
+            results[0],
+            results[1],
+            "Ramura de creare și ramura de merge produc stări diferite.",
+        )
 
 
 if __name__ == "__main__":

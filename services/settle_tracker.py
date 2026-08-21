@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Callable, List, Optional
@@ -43,22 +43,56 @@ class PendingFile:
     path: str #calea normalizată, așa cum va fi raportată
     event_type: str #tipul înghețat la prima observație (vezi Decizia 1)
     occurred_at: str #ceasul de perete la PRIMA observație (Decizia 1)
-    first_seen: float #ceasul monoton la prima observație
-    last_seen: float #ceasul monoton la ultima observație
+    first_seen: float #ceasul monoton la prima observație, PESTE toate reintroducerile
+    last_seen: float #ceasul monoton la ultima dovadă că fișierul se schimbă
     released_at: Optional[float] = None #ceasul monoton la eliberare (None cât e în așteptare)
     observation_count: int = 1 #câte evenimente watchdog au fost absorbite
     forced_reason: Optional[str] = None #None dacă s-a stabilizat natural; altfel motivul eliberării forțate "ceiling" | "capacity" | "shutdown"
+    reintroduction_count: int = 0 #de câte ori hash-ul a eșuat verificarea dublă și fișierul a fost repus în așteptare
 
+    # Momentul în care s-a deschis fereastra CURENTĂ de stabilizare. Egal cu
+    # first_seen pentru o intrare care n-a fost niciodată reintrodusă; repornit
+    # la fiecare reintroducere.
+    #
+    # Există pentru că first_seen avea două slujbe care aveau accidental același
+    # răspuns până la Pasul 0.3:
+    #   - ancora costului (settle_wait_ms), care trebuie să acopere TOT, inclusiv
+    #     ciclurile de reintroducere — vezi contracts/wire-contract.json,
+    #     models.event_measurements;
+    #   - ancora plafonului de așteptare, care întreabă „de cât timp suprim
+    #     raportarea acestui fișier?".
+    #
+    # Reintroducerea le desparte: costul se cumulează, suprimarea reîncepe.
+    # Ținute pe același câmp, un fișier reintrodus ar depăși plafonul din prima
+    # clipă și ar fi reeliberat instantaneu — a doua cale de eliberare prematură,
+    # independentă de last_seen.
+    #
+    # init=False, deliberat. Câmpul nu apare în __init__: orice intrare se naște
+    # cu fereastra deschisă la first_seen, iar singurul loc care are voie s-o
+    # repornească este reintroduce(), prin atribuire explicită. Alternativa —
+    # un parametru Optional[float] cu valoare implicită None — ar fi cerut
+    # tuturor cititorilor (due(), teste) să trateze un None care nu apare
+    # niciodată în practică, adică o adnotare care minte. Aici tipul e float
+    # peste tot, iar excepția stă vizibil acolo unde chiar se întâmplă.
+    settling_since: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.settling_since = self.first_seen
 
     @property
     def settle_wait_ms(self) -> Optional[int]:
         """
         Latența totală introdusă de mecanism: de la prima observație până la
-        eliberare, incluzând perioada de liniște.
+        eliberare, incluzând perioada de liniște ȘI toate ciclurile de
+        reintroducere.
 
-        Nu este „cât timp s-a scris fișierul" (acela ar fi last_seen -
-        first_seen). Este costul observației, adică exact ce declară
-        contracts/wire-contract.json la models.event_measurements.
+        Se sprijină deliberat pe first_seen, nu pe settling_since: acesta e
+        costul observației, iar o citire care a trebuit repetată a costat
+        efectiv de două ori. Nu este „cât timp s-a scris fișierul" (acela ar fi
+        last_seen - first_seen), și nu este durata ultimei ferestre de
+        stabilizare (aceea ar fi released_at - settling_since).
+
+        Exact ce declară contracts/wire-contract.json la models.event_measurements.
         """
         if self.released_at is None:
             return None
@@ -115,12 +149,18 @@ class SettleTracker:
 
         self.logger = logger or logging.getLogger(__name__)
 
-        # Ordinea este ordinea PRIMEI observații și nu se rearanjează niciodată
-        # (fără move_to_end). Diferență intenționată față de EventDebouncer:
-        # acolo ordinea era „ultima apariție", pentru că se evacua ce fusese
-        # atins cel mai demult. Aici, la presiune, trebuie eliberate intrările
-        # care au așteptat cel mai mult — deci ordinea corectă este cea de
-        # intrare. Aceeași structură de date, semantică opusă.
+        # Ordinea este ordinea deschiderii ferestrei CURENTE de stabilizare —
+        # adică ordinea lui settling_since. Pentru o intrare care n-a fost
+        # reintrodusă, aceasta e chiar ordinea primei observații, ca înainte;
+        # o intrare reintrodusă se mută la coadă, pentru că fereastra ei tocmai
+        # a repornit.
+        #
+        # Diferență intenționată față de EventDebouncer: acolo ordinea era
+        # „ultima apariție", pentru că se evacua ce fusese atins cel mai demult.
+        # Aici, la presiune, trebuie eliberate intrările care au așteptat cel
+        # mai mult în fereastra curentă — a elibera devreme o intrare tocmai
+        # reintrodusă ar însemna încă o citire integrală care va pica aproape
+        # sigur aceeași verificare dublă.
         self._pending: "OrderedDict[str, PendingFile]" = OrderedDict()
 
         # Intrări deja decise, care așteaptă doar să fie colectate de due().
@@ -183,7 +223,7 @@ class SettleTracker:
 
             for key, pending in self._pending.items():
                 settled_naturally = (now - pending.last_seen) >= self.quiet_seconds
-                hit_ceiling = (now - pending.first_seen) >= self.max_wait_seconds
+                hit_ceiling = (now - pending.settling_since) >= self.max_wait_seconds
 
                 if settled_naturally:
                     pending.forced_reason = None
@@ -191,10 +231,11 @@ class SettleTracker:
                     pending.forced_reason = "ceiling"
                     self.logger.warning(
                         "File released at the settle ceiling while still changing: %s "
-                        "(%s observations in %.1fs)",
+                        "(%s observations in %.1fs, %s reintroduction(s))",
                         pending.path,
                         pending.observation_count,
-                        now - pending.first_seen,
+                        now - pending.settling_since,
+                        pending.reintroduction_count,
                     )
                 else:
                     continue
@@ -230,6 +271,71 @@ class SettleTracker:
             self._pending.clear()
 
         return released
+
+    def reintroduce(self, pending: PendingFile) -> None:
+        """
+        Repune în așteptare un fișier care s-a schimbat în timpul hashing-ului.
+
+        Apelat de FileHasher când verificarea dublă (stat înainte, stat după)
+        arată că fișierul s-a mișcat: hash-ul calculat descrie o stare care nu a
+        existat niciodată ca fișier finit, deci se aruncă.
+
+        Eșecul verificării duble ESTE o observație — cea mai proaspătă pe care o
+        are agentul, obținută în clipa în care hasher-ul a terminat de citit.
+        De aceea last_seen devine 'acum' și fereastra de stabilizare repornește
+        de aici. Fără asta, agentul ar constata cu ochii lui că fișierul se
+        mișcă și, în aceeași frază, ar declara că nu s-a mișcat de o secundă.
+
+        Ce se păstrează și de ce:
+          - occurred_at, event_type și first_seen rămân cele originale.
+            Evenimentul descrie aceeași apariție a fișierului, doar amânată;
+            settle_wait_ms trebuie să acopere TOATĂ latența, inclusiv ciclurile
+            de reintroducere, altfel costul raportat ar fi mai mic decât cel real.
+          - reintroduction_count crește. Fără el, un fișier care se schimbă
+            perpetuu ar circula la nesfârșit între tracker și hasher. Plafonul
+            e impus de hasher, singurul care știe câte încercări a consumat.
+          - observation_count adună și observațiile sosite cât timp hasher-ul
+            citea. Ferestrele nu se suprapun (intrarea nouă s-a putut deschide
+            abia după ce due() a scos-o pe cea veche), deci nu se numără de două ori.
+
+        O SINGURĂ cale, indiferent dacă între timp a sosit sau nu o observație
+        watchdog nouă pentru aceeași cale. Ramura de merge este cazul OBIȘNUIT,
+        nu excepția: aceeași scriere fizică e și motivul pentru care verificarea
+        dublă a picat, și motivul pentru care intrarea nouă există. Două ramuri
+        cu comportamente diferite ar face rezultatul să depindă de un detaliu
+        nedeterminist — dacă watchdog a apucat sau nu să livreze evenimentul.
+        """
+        key = os.path.normcase(pending.path)
+        now = self._clock()
+
+        with self._lock:
+            observed_while_hashing = self._pending.pop(key, None)
+
+            absorbed = (
+                observed_while_hashing.observation_count
+                if observed_while_hashing is not None
+                else 0
+            )
+
+            reintroduced = PendingFile(
+                path=pending.path,
+                event_type=pending.event_type,
+                occurred_at=pending.occurred_at,
+                first_seen=pending.first_seen,
+                last_seen=now,
+                observation_count=pending.observation_count + absorbed,
+                reintroduction_count=pending.reintroduction_count + 1,
+            )
+
+            # Singurul loc din agent care repornește fereastra de stabilizare.
+            # Atribuire separată, nu parametru de constructor: intrarea se naște
+            # cu fereastra la first_seen ca oricare alta, iar linia de față este
+            # exact diferența dintre o intrare nouă și una reintrodusă.
+            reintroduced.settling_since = now
+
+            self._pending[key] = reintroduced
+
+            self._force_release_over_capacity(now)
 
     def pending_count(self) -> int:
         """Câte fișiere sunt în așteptare (fără cele deja decise)."""

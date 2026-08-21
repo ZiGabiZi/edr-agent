@@ -1,18 +1,22 @@
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
-from uuid import uuid4
+from typing import Callable, FrozenSet, Iterable, Optional
 
 from watchdog.events import FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from services.file_event import (  # noqa: F401  (reexportate pentru apelanții existenți)
+    FileEventCallback,
+    build_file_event_payload,
+    normalize_file_path,
+)
+from services.file_hasher import FileHasher, HashSubmitter
 from services.settle_tracker import (
     DEFAULT_MAX_SETTLE_WAIT_SECONDS,
     DEFAULT_SETTLE_QUIET_SECONDS,
-    PendingFile,
     SettleTracker,
 )
 
@@ -24,11 +28,16 @@ DEFAULT_MONITORED_EXTENSIONS: FrozenSet[str] = frozenset()
 # deci trebuie să fie mică față de quiet_seconds, nu față de ceva absolut.
 DEFAULT_RELEASE_POLL_SECONDS = 0.25
 
-# De câte ori se încearcă livrarea unui eveniment către spool înainte de a
-# renunța. Vezi SettleReleaser pentru motivul existenței reîncercărilor.
-_RELEASER_MAX_EMIT_ATTEMPTS = 5
-
-FileEventCallback = Callable[[Dict[str, str]], None]
+# Cât din bugetul TOTAL de oprire se rezervă pentru raportare, după ce
+# hashing-ul s-a oprit.
+#
+# Fără rezerva asta, termenul de hashing ar coincide cu termenul lui join(),
+# iar drenarea ar mai avea de emis exact atunci când apelantul renunță să mai
+# aștepte — adică fix scenariul în care agentul închide spool-ul sub un fir
+# încă viu, iar coada întreagă se pierde câte un ERROR pe rând.
+#
+# O secundă acoperă confortabil MAX_HASH_QUEUE_DEPTH scrieri în spool.
+DEFAULT_SHUTDOWN_REPORT_RESERVE_SECONDS = 1.0
 
 
 class FileMonitorError(Exception):
@@ -36,79 +45,15 @@ class FileMonitorError(Exception):
     pass
 
 
-def normalize_file_path(file_path: str) -> str:
-    """
-    Normalizează calea unui fișier pentru raportare și comparare.
-
-    Funcționează atât pe Windows, cât și pe Linux.
-    """
-    return os.path.abspath(file_path)
-
-
-def build_file_event_payload(
-    agent_id: str,
-    event_type: str,
-    file_path: str,
-    agent_instance_id: str,
-    occurred_at: Optional[str] = None,
-    settle_wait_ms: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    Construiește payload-ul unui eveniment de fișier.
-
-    occurred_at este momentul PRIMEI observații a fișierului, furnizat de
-    SettleTracker (Decizia 1). Trebuie transmis explicit tocmai pentru că
-    raportarea are loc cu întârziere, după stabilizare: calculat aici, ar fi
-    momentul emiterii, nu al faptului, iar serverul ar ordona evenimentele
-    greșit — exact eroarea pe care câmpul occurred_at a fost introdus s-o
-    prevină (vezi nota din contracts/wire-contract.json).
-
-    Rămâne opțional pentru compatibilitate cu apelurile care nu trec încă prin
-    tracker; absent, se folosește ceasul de acum.
-
-    settle_wait_ms, când este prezent, călătorește sub measurements — model
-    separat structural tocmai ca să nu se amestece cu câmpurile care descriu
-    fișierul. Niciun câmp de acolo nu are voie să intre într-o decizie de
-    verdict sau de escaladare.
-    """
-    current_time = datetime.now(timezone.utc).isoformat()
-    event_time = occurred_at or current_time
-    normalized_path = normalize_file_path(file_path)
-
-    descriptions = {
-        "file_created": "New file detected in monitored directory",
-        "file_modified": "File modified in monitored directory",
-    }
-
-    description = descriptions.get(event_type, "File system event detected")
-
-    payload: Dict[str, Any] = {
-        "client_event_id": str(uuid4()),
-        "agent_id": agent_id,
-        "agent_instance_id": agent_instance_id,
-        "event_type": event_type,
-        "occurred_at": event_time,
-        "file_path": normalized_path,
-        "description": f"{description} at {event_time}",
-    }
-
-    if settle_wait_ms is not None:
-        payload["measurements"] = {"settle_wait_ms": settle_wait_ms}
-
-    return payload
-
-
 class EDRFileEventHandler(FileSystemEventHandler):
     """
     Filtrează evenimentele watchdog și le predă tracker-ului de stabilizare.
 
-    Handler-ul nu mai construiește payload-uri și nu mai apelează callback-ul
-    de raportare: rulează pe firul observer-ului watchdog, unde orice lucru
-    care poate dura sau eșua este interzis. Singura lui treabă este să decidă
-    dacă evenimentul este relevant și, dacă da, să-l observe în tracker —
-    operație de memorie, fără I/O, care revine imediat.
-
-    Emiterea efectivă aparține lui SettleReleaser, pe firul lui propriu.
+    Handler-ul nu construiește payload-uri și nu apelează callback-ul de
+    raportare: rulează pe firul observer-ului watchdog, unde orice lucru care
+    poate dura sau eșua este interzis. Singura lui treabă este să decidă dacă
+    evenimentul este relevant și, dacă da, să-l observe în tracker — operație
+    de memorie, fără I/O, care revine imediat.
     """
 
     def __init__(
@@ -216,61 +161,34 @@ class EDRFileEventHandler(FileSystemEventHandler):
 
 class SettleReleaser:
     """
-    Golește periodic tracker-ul și emite evenimentele devenite gata.
+    Mută fișierele stabilizate din tracker în coada de hashing.
 
-    Rulează pe un fir propriu, deținut de FileMonitor. Bucla consultă
-    SettleTracker.due() la fiecare poll_seconds, construiește payload-ul
-    fiecărui fișier eliberat și îl predă callback-ului de raportare (în
-    producție: spool-ul de evenimente).
+    Rulează pe un fir propriu, deținut de FileMonitor. Nu construiește
+    payload-uri și nu emite nimic — de la introducerea hasher-ului, raportarea
+    aparține exclusiv acestuia, pentru că doar acolo se știe ce hash_status
+    poartă evenimentul.
 
-    De ce există reîncercările — și de ce nu existau înainte
-    ------------------------------------------------------
-    În vechiul flux, callback-ul era apelat direct de pe firul watchdog, iar un
-    eșec era recuperabil de la sine: următoarea scriere în fișier regenera
-    evenimentul. due() însă SCOATE intrarea din tracker; fișierul s-a liniștit,
-    deci niciun eveniment watchdog nu-l va mai reînvia. Același eșec de
-    callback, dintr-o pierdere temporară, devine pierdere definitivă. De aceea
-    un payload care nu a putut fi predat se reține și se reîncearcă la
-    trecerile următoare.
-
-    Payload-ul se construiește O SINGURĂ DATĂ, la prima încercare, și se
-    reține ca atare între reîncercări: client_event_id rămâne astfel stabil,
-    iar deduplicarea de pe server (semantica at-least-once a spool-ului)
-    rămâne validă chiar dacă o încercare a apucat să producă efecte parțiale.
-
-    După max_emit_attempts eșecuri consecutive, evenimentul se abandonează cu
-    un log de nivel ERROR (Decizia 2): un disc plin sau un spool corupt nu
-    trebuie să blocheze coada la nesfârșit, dar nici să treacă neobservat.
-
-    Starea de reîncercare (_retry) este atinsă exclusiv de pe firul releaser-ului
-    (bucla run() și drenarea de la oprire rulează pe același fir), deci nu are
-    nevoie de lacăt. Testele apelează release_due_once() direct, fără fir.
+    Firul rămâne separat de cel al hasher-ului tocmai pentru că hashing-ul
+    poate dura: dacă aceeași buclă ar face și golirea tracker-ului, un fișier
+    de 200 MB ar bloca due() pentru toată durata citirii, iar garanția
+    tracker-ului („orice intrare iese în cel mult max_wait_seconds") ar cădea.
+    Aici, fiecare trecere e în timp constant.
     """
 
     def __init__(
         self,
         tracker: SettleTracker,
-        event_callback: FileEventCallback,
-        agent_id: str,
-        agent_instance_id: str,
+        hasher: HashSubmitter,
         logger: logging.Logger,
         poll_seconds: float = DEFAULT_RELEASE_POLL_SECONDS,
-        max_emit_attempts: int = _RELEASER_MAX_EMIT_ATTEMPTS,
     ):
         self.tracker = tracker
-        self.event_callback = event_callback
-        self.agent_id = agent_id
-        self.agent_instance_id = agent_instance_id
+        self.hasher = hasher
         self.logger = logger
         self.poll_seconds = poll_seconds
-        self.max_emit_attempts = max_emit_attempts
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-
-        # Payload-uri care au eșuat la livrare, cu numărul de încercări
-        # consumate. Listă simplă, fără lacăt — vezi docstring-ul clasei.
-        self._retry: List[Tuple[Dict[str, Any], int]] = []
 
     def start(self) -> None:
         """Pornește firul de eliberare."""
@@ -291,11 +209,10 @@ class SettleReleaser:
         oprire, apoi drenarea finală.
 
         Fiecare trecere este împachetată într-o gardă: garanția tracker-ului
-        („orice intrare iese în cel mult max_wait_seconds") este adevărată doar
-        cât timp cineva apelează due(). Dacă firul ar muri dintr-o excepție
-        neprevăzută, tracker-ul s-ar umple în tăcere și monitorizarea ar orbi
-        fără niciun semn exterior — un mod de eșec pe care vechiul flux, rulând
-        pe firul watchdog, nu îl avea.
+        este adevărată doar cât timp cineva apelează due(). Dacă firul ar muri
+        dintr-o excepție neprevăzută, tracker-ul s-ar umple în tăcere și
+        monitorizarea ar orbi fără niciun semn exterior — un mod de eșec pe
+        care vechiul flux, rulând pe firul watchdog, nu îl avea.
         """
         while not self._stop_event.wait(self.poll_seconds):
             try:
@@ -327,101 +244,41 @@ class SettleReleaser:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
 
+    def is_alive(self) -> bool:
+        """Dacă firul de eliberare mai rulează (inclusiv în drenare)."""
+        return self._thread is not None and self._thread.is_alive()
+
     def release_due_once(self) -> int:
         """
-        Corpul unei treceri: întâi reîncercările, apoi ce a devenit gata.
+        Corpul unei treceri: tot ce s-a stabilizat trece în coada de hashing.
 
-        Reîncercările au prioritate pentru că au așteptat deja cel puțin o
-        trecere întreagă. Metoda este publică și apelabilă direct din teste,
-        cu ceas fals în tracker — firul nu este necesar pentru corectitudine,
-        doar pentru cadență.
+        Metoda este publică și apelabilă direct din teste, cu ceas fals în
+        tracker — firul nu este necesar pentru corectitudine, doar pentru
+        cadență.
 
-        Returnează numărul de evenimente predate cu succes.
+        Returnează numărul de fișiere predate hasher-ului.
         """
-        emitted = 0
-
-        pending_retries = self._retry
-        self._retry = []
-        for payload, attempts in pending_retries:
-            emitted += self._emit(payload, attempts)
+        handed_over = 0
 
         for pending in self.tracker.due():
-            emitted += self._emit(self._build_payload(pending), 0)
+            self.hasher.submit(pending)
+            handed_over += 1
 
-        return emitted
+        return handed_over
 
     def drain_for_shutdown(self) -> int:
         """
-        Ultima acțiune a firului: golește tot ce a rămas, cu o singură șansă.
-
-        La oprire nu mai există „treceri următoare", deci semantica
-        reîncercărilor nu mai are sens: fiecare payload — reîncercare veche sau
-        intrare proaspăt eliberată de flush() — primește exact o încercare,
-        iar eșecul se raportează direct la nivel ERROR. Tehnic, asta înseamnă
-        a intra în _emit cu contorul deja la max_emit_attempts - 1.
+        Ultima acțiune a firului: tot ce mai aștepta stabilizarea trece la
+        hashing, ca hasher-ul să îl găsească în coadă când ajunge și el la
+        drenare.
         """
-        emitted = 0
-
-        pending_retries = self._retry
-        self._retry = []
-        for payload, _ in pending_retries:
-            emitted += self._emit(payload, self.max_emit_attempts - 1)
+        handed_over = 0
 
         for pending in self.tracker.flush():
-            emitted += self._emit(
-                self._build_payload(pending), self.max_emit_attempts - 1
-            )
+            self.hasher.submit(pending)
+            handed_over += 1
 
-        return emitted
-
-    def _build_payload(self, pending: PendingFile) -> Dict[str, Any]:
-        return build_file_event_payload(
-            agent_id=self.agent_id,
-            event_type=pending.event_type,
-            file_path=pending.path,
-            agent_instance_id=self.agent_instance_id,
-            occurred_at=pending.occurred_at,
-            settle_wait_ms=pending.settle_wait_ms,
-        )
-
-    def _emit(self, payload: Dict[str, Any], attempts_so_far: int) -> int:
-        """
-        O încercare de livrare. La eșec, reține payload-ul pentru trecerea
-        următoare sau, la epuizarea încercărilor, îl abandonează cu ERROR.
-        """
-        try:
-            self.event_callback(payload)
-        except Exception as error:
-            attempts = attempts_so_far + 1
-
-            if attempts >= self.max_emit_attempts:
-                self.logger.error(
-                    "Dropping %s event for file %s after %d failed delivery "
-                    "attempts: %s",
-                    payload.get("event_type"),
-                    payload.get("file_path"),
-                    attempts,
-                    error,
-                )
-            else:
-                self._retry.append((payload, attempts))
-                self.logger.warning(
-                    "Could not report %s event for file %s "
-                    "(attempt %d of %d), will retry: %s",
-                    payload.get("event_type"),
-                    payload.get("file_path"),
-                    attempts,
-                    self.max_emit_attempts,
-                    error,
-                )
-            return 0
-
-        self.logger.info(
-            "Detected and reported %s event for file: %s",
-            payload.get("event_type"),
-            payload.get("file_path"),
-        )
-        return 1
+        return handed_over
 
 
 class FileMonitor:
@@ -431,10 +288,14 @@ class FileMonitor:
     Monitorizarea poate fi recursivă și funcționează prin biblioteca watchdog,
     compatibilă cu Windows, Linux și macOS.
 
-    Deține trei piese și le leagă:
-      - observer-ul watchdog, care produce observații brute;
-      - SettleTracker, care decide când un fișier a încetat să se schimbe;
-      - SettleReleaser, pe fir propriu, care emite ce a devenit gata.
+    Deține patru piese și le leagă într-un lanț cu trei etaje de fire:
+
+        watchdog  -> tracker.observe()            (fir observer, timp constant)
+        releaser  -> tracker.due() -> hasher      (fir propriu, timp constant)
+        hasher    -> stat/hash/re-stat -> spool   (fir propriu, poate dura)
+
+    Separarea nu e ornamentală: fiecare etaj protejează garanția etajului de
+    dinaintea lui de latența etajului de după.
     """
 
     def __init__(
@@ -449,7 +310,11 @@ class FileMonitor:
         quiet_seconds: float = DEFAULT_SETTLE_QUIET_SECONDS,
         max_wait_seconds: float = DEFAULT_MAX_SETTLE_WAIT_SECONDS,
         release_poll_seconds: float = DEFAULT_RELEASE_POLL_SECONDS,
+        report_reserve_seconds: float = DEFAULT_SHUTDOWN_REPORT_RESERVE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ):
+        self.report_reserve_seconds = report_reserve_seconds
+        self._clock = clock
         self.agent_id = agent_id
         self.agent_instance_id = agent_instance_id
         self.monitored_directories = list(monitored_directories)
@@ -462,11 +327,17 @@ class FileMonitor:
             logger=self.logger,
         )
 
-        self.releaser = SettleReleaser(
+        self.hasher = FileHasher(
             tracker=self.tracker,
             event_callback=event_callback,
             agent_id=agent_id,
             agent_instance_id=agent_instance_id,
+            logger=self.logger,
+        )
+
+        self.releaser = SettleReleaser(
+            tracker=self.tracker,
+            hasher=self.hasher,
             logger=self.logger,
             poll_seconds=release_poll_seconds,
         )
@@ -488,9 +359,9 @@ class FileMonitor:
         Directoarele inexistente sunt ignorate și raportate în log.
         Agentul nu creează automat directoare arbitrare din configurație.
 
-        Firul de eliberare pornește doar dacă observer-ul a pornit: fără
-        observații nu are ce elibera, iar un fir orfan care se rotește peste un
-        tracker mereu gol ar fi doar zgomot.
+        Firele auxiliare pornesc doar dacă observer-ul a pornit: fără
+        observații nu au ce prelucra, iar fire orfane care se rotesc peste cozi
+        mereu goale ar fi doar zgomot.
         """
 
         if self._started:
@@ -536,6 +407,7 @@ class FileMonitor:
             )
 
         self.observer.start()
+        self.hasher.start()
         self.releaser.start()
         self._started = True
 
@@ -546,38 +418,95 @@ class FileMonitor:
 
     def stop(self) -> None:
         """
-        Oprește observer-ul watchdog. Deliberat, NU oprește releaser-ul.
+        Oprește observer-ul watchdog. Deliberat, NU oprește celelalte fire.
 
-        Ordinea la oprire nu este negociabilă: releaser-ul trebuie semnalizat
-        abia după ce observer-ul a fost oprit ȘI așteptat (în join()), altfel
-        observații sosite între drenarea finală și moartea observer-ului ar
-        intra într-un tracker pe care nimeni nu-l mai golește — pierdute fără
-        nicio urmă. Secvența completă trăiește în join().
+        Ordinea la oprire nu este negociabilă și trăiește în join(): fiecare
+        etaj trebuie drenat complet înainte ca următorul să fie semnalizat,
+        altfel drenarea unuia produce intrări pe care următorul nu le mai
+        colectează niciodată.
         """
         if self._started:
             self.logger.info("Stopping file monitoring...")
             self.observer.stop()
 
-    def join(self, timeout: Optional[float] = None) -> None:
+    def join(self, timeout: Optional[float] = None) -> bool:
         """
         Așteaptă oprirea completă, în ordinea care nu pierde evenimente:
 
           1. observer-ul watchdog se termină — nu mai pot sosi observații;
-          2. releaser-ul primește semnalul de oprire, iar ultima lui acțiune,
-             pe firul lui, este drenarea: tracker.flush() plus emiterea a tot
-             ce a ieșit;
-          3. se așteaptă firul releaser-ului.
+          2. releaser-ul primește semnalul, iar ultima lui acțiune, pe firul
+             lui, este tracker.flush() cu predarea tuturor intrărilor rămase
+             către coada hasher-ului;
+          3. se așteaptă firul releaser-ului — abia acum coada hasher-ului e
+             completă;
+          4. hasher-ul primește semnalul ȘI termenul, apoi își golește coada:
+             hash-uiește cât încape până la termen, raportează restul fără hash;
+          5. se așteaptă firul hasher-ului.
 
-        Abia la final _started devine fals: monitorul este „pornit" până când
-        ultima lui piesă s-a oprit de tot, nu până când prima a primit semnalul.
+        Inversarea pașilor 3 și 4 ar fi cea mai ușoară greșeală de făcut aici:
+        hasher-ul ar drena o coadă în care flush-ul releaser-ului nu a ajuns
+        încă, iar acele fișiere n-ar fi raportate niciodată.
+
+        timeout este un buget TOTAL, nu unul per etaj
+        --------------------------------------------
+        Înainte, același timeout se dădea fiecăreia dintre cele trei așteptări,
+        deci join(timeout=5) putea dura 15 secunde. Semnătura promitea o limită
+        și livra un multiplu al ei — minciună care creștea tăcut cu fiecare etaj
+        adăugat. Aici se calculează un singur termen absolut la intrare, iar
+        fiecare etaj primește cât a mai rămas din el.
+
+        Termenul de HASHING este cu report_reserve_seconds mai devreme decât
+        termenul total, ca drenarea să apuce să-și emită coada înainte ca
+        apelantul să renunțe. Fără rezerva asta, hashing-ul s-ar opri exact
+        când join() cedează, iar raportarea ar cădea în intervalul în care
+        agentul deja închide spool-ul.
+
+        Returnează True dacă toate cele trei etaje s-au oprit de tot. False
+        înseamnă că un fir e încă viu — informație de care apelantul are nevoie
+        înainte să închidă resurse pe care firul acela încă le folosește.
         """
         if not self._started:
-            return
+            return True
 
-        self.observer.join(timeout=timeout)
+        deadline = None if timeout is None else self._clock() + timeout
+
+        def remaining() -> Optional[float]:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - self._clock())
+
+        self.observer.join(timeout=remaining())
+
         self.releaser.stop()
-        self.releaser.join(timeout=timeout)
+        self.releaser.join(timeout=remaining())
+
+        hash_deadline = (
+            None if deadline is None else deadline - self.report_reserve_seconds
+        )
+        self.hasher.stop(deadline=hash_deadline)
+        self.hasher.join(timeout=remaining())
+
         self._started = False
+
+        stalled = [
+            name
+            for name, alive in (
+                ("watchdog observer", self.observer.is_alive()),
+                ("settle releaser", self.releaser.is_alive()),
+                ("file hasher", self.hasher.is_alive()),
+            )
+            if alive
+        ]
+
+        if stalled:
+            self.logger.error(
+                "File monitoring did not stop within its budget; still running: "
+                "%s. These threads may still be writing to the event spool.",
+                ", ".join(stalled),
+            )
+            return False
+
+        return True
 
     def is_running(self) -> bool:
         """Returnează dacă observer-ul de monitorizare este activ."""
