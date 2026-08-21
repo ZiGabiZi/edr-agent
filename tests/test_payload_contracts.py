@@ -39,10 +39,10 @@ from services.settle_tracker import SettleTracker
 from tests.wire_contract import (
     CONTRACT,
     declared_fields,
-    find_peer_repo,
     forbidden_fields,
     load_contract,
     required_fields,
+    require_peer_repo,
 )
 
 
@@ -277,15 +277,9 @@ class ContractSyncTests(unittest.TestCase):
     """
 
     def test_the_peer_repository_carries_the_same_contract(self) -> None:
-        peer_repo = find_peer_repo()
-
-        if peer_repo is None:
-            self.skipTest(
-                "edr-server nu a fost gasit langa agent; sincronizarea celor doua "
-                "exemplare ramane neverificata in aceasta rulare. Seteaza "
-                "EDR_SERVER_PATH pentru a o verifica."
-            )
-
+        peer_repo = require_peer_repo(
+            "sincronizarea celor două exemplare de contract"
+        )
         peer_contract = load_contract(peer_repo)
 
         # Comparăm JSON-ul parsat, nu octeții: repo-urile sunt clonate și pe

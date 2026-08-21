@@ -21,6 +21,7 @@ De ce există acest modul:
 
 import json
 import os
+import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -32,6 +33,28 @@ CONTRACT_RELATIVE_PATH = Path("contracts") / "wire-contract.json"
 # este că cele două clone stau una lângă alta.
 PEER_REPO_NAME = "edr-server"
 PEER_PATH_ENV_VAR = "EDR_SERVER_PATH"
+
+# Comută absența repo-ului pereche între skip și eșec.
+#
+#   "1"     — obligatoriu: absența e eșec de suită
+#   "0"     — opțional: absența e skip
+#   nesetat — obligatoriu dacă rulăm sub CI, opțional altfel
+#
+# De ce nu e simplu skip întotdeauna: verificările cross-repo sunt singurele
+# care confruntă cele două părți ale contractului, iar un skip e o linie gri
+# printre sute de puncte verzi. Pe o mașină de integrare care clonează un
+# singur repo, exact testele care contează cel mai mult tac, iar raportul
+# spune „totul verde".
+#
+# De ce nu e simplu eșec întotdeauna: o clonă singură trebuie să rămână
+# testabilă. Cine ia doar acest repo și rulează suita nu a greșit cu nimic.
+#
+# CI (setat de GitHub Actions, GitLab, CircleCI, Azure și altele) desparte
+# cele două situații fără ca nimeni să trebuiască să-și amintească ceva.
+#
+# Numele variabilei e identic cu cel din edr-server: aceeași regulă, același
+# comutator, în ambele repo-uri.
+PEER_REQUIRED_ENV_VAR = "EDR_REQUIRE_PEER_REPO"
 
 
 def load_contract(repo_root: Path = AGENT_REPO_ROOT) -> Dict[str, Any]:
@@ -111,3 +134,46 @@ def find_peer_repo() -> Optional[Path]:
     sibling = AGENT_REPO_ROOT.parent / PEER_REPO_NAME
 
     return sibling if (sibling / CONTRACT_RELATIVE_PATH).is_file() else None
+
+
+def peer_repo_is_required() -> bool:
+    """Dacă absența repo-ului pereche trebuie tratată ca eșec, nu ca skip."""
+    configured = os.environ.get(PEER_REQUIRED_ENV_VAR)
+
+    if configured is not None:
+        return configured.strip().lower() in {"1", "true", "yes"}
+
+    return bool(os.environ.get("CI"))
+
+
+def require_peer_repo(what_goes_unverified: str) -> Path:
+    """
+    Repo-ul pereche, sau capătul testului — skip ori eșec, după mediu.
+
+    Ridicarea lui SkipTest funcționează de oriunde, nu doar dintr-o metodă de
+    test, deci locul de apel rămâne o singură linie. what_goes_unverified
+    numește exact ce rămâne neverificat: mesajul ajunge și în raportul de skip,
+    și în cel de eșec, iar cine îl citește trebuie să afle ce anume nu s-a
+    verificat, nu doar că un fișier lipsea.
+    """
+    peer_repo = find_peer_repo()
+
+    if peer_repo is not None:
+        return peer_repo
+
+    message = (
+        f"{PEER_REPO_NAME} nu a fost găsit lângă agent, deci "
+        f"{what_goes_unverified} rămâne neverificat în această rulare. "
+        f"Clonează cele două repo-uri alături, sau indică {PEER_PATH_ENV_VAR} "
+        f"către clona {PEER_REPO_NAME}."
+    )
+
+    if peer_repo_is_required():
+        raise AssertionError(
+            f"{message} Rulare marcată ca obligatorie "
+            f"({PEER_REQUIRED_ENV_VAR}=1 sau CI setat). Dacă acest job chiar "
+            f"clonează un singur repo, setează {PEER_REQUIRED_ENV_VAR}=0 — "
+            f"explicit, ca golul să fie o decizie, nu o scăpare."
+        )
+
+    raise unittest.SkipTest(message)
