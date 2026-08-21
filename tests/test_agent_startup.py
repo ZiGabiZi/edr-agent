@@ -249,6 +249,15 @@ class FakeDispatcher:
     def join(self, timeout=None) -> None:
         pass
 
+    def is_alive(self) -> bool:
+        """
+        EventDispatcher e o subclasă de Thread, deci is_alive() face parte din
+        contractul lui. Dublura îl expune pentru că agent.py îl interoghează
+        înainte de a închide spool-ul: un dispatcher încă viu citește din
+        conexiunea pe care close() ar închide-o.
+        """
+        return False
+
 
 class FakeMonitor:
     def __init__(self, journal: list) -> None:
@@ -262,8 +271,9 @@ class FakeMonitor:
         self._running = False
         self._journal.append("monitor_stopped")
 
-    def join(self, timeout=None) -> None:
-        pass
+    def join(self, timeout=None) -> bool:
+        """True = toate cele trei etaje s-au oprit; vezi FileMonitor.join."""
+        return True
 
 
 class _FakeThreadingModule:

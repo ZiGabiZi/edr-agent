@@ -700,17 +700,53 @@ def run_agent() -> None:
         stop_event.set()
         # Trimitem evenimentul de shutdown indiferent de cum s-a oprit agentul,
         # atât timp cât avem suficientă configurație și serverul poate fi accesibil.
-        if file_monitor is not None and file_monitor.is_running():
+        # Fără garda is_running(), deliberat. Aceea cerea observer.is_alive():
+        # dacă firul watchdog murea din orice motiv, oprirea era sărită cu
+        # totul, iar firele releaser-ului și hasher-ului — daemon — mureau
+        # odată cu procesul, în mijlocul a ce făceau. Nu expira niciun termen,
+        # pentru că nu se intra niciodată în drenare. stop() și join() sunt
+        # amândouă sigure dacă monitorul nu a pornit.
+        producers_stopped = True
+
+        if file_monitor is not None:
             file_monitor.stop()
-            file_monitor.join(timeout=5)
+            producers_stopped = file_monitor.join(timeout=5)
 
         if event_dispatcher is not None:
             event_dispatcher.stop()
             event_dispatcher.join(timeout=5)
 
+            if event_dispatcher.is_alive():
+                producers_stopped = False
+                logger.error(
+                    "Event dispatcher did not stop within its budget; it may "
+                    "still be reading from the event spool."
+                )
+
         if event_spool is not None:
-            event_spool.close()
-            
+            # Spool-ul se închide DOAR dacă nimeni nu-l mai folosește.
+            #
+            # close() închide conexiunea SQLite fără să întrebe pe nimeni dacă
+            # mai are utilizatori. Cu un fir de hashing încă viu, următorul lui
+            # enqueue() ridică ProgrammingError, iar în drenare fiecare payload
+            # are exact o încercare — deci nu se pierde un eveniment, se pierde
+            # toată coada rămasă, câte un ERROR pe rând. Drenarea, care există
+            # tocmai ca să prevină pierderea la oprire, devine calea prin care
+            # ea se produce.
+            #
+            # A NU închide e ieftin: SQLite își închide conexiunea la ieșirea
+            # procesului, iar ce a fost comis e deja durabil. Renunțăm la o
+            # închidere curată ca să nu pierdem coada.
+            if producers_stopped:
+                event_spool.close()
+            else:
+                logger.error(
+                    "Leaving the event spool open: a producer thread is still "
+                    "running and closing it now would drop everything it has "
+                    "left to write."
+                )
+
+
         if config and registered and config.get("agent_id") and server_url is not None:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
