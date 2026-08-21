@@ -6,6 +6,16 @@
     "monitored_directories": [
         "C:\\EDR_Test"
     ],
-    "recursive_monitoring": true
+    "recursive_monitoring": true,
 
+    "settle_quiet_seconds": 1.0,
+    "settle_max_wait_seconds": 60.0,
+    "release_poll_seconds": 0.25,
+
+    "hash_max_file_size_bytes": 209715200,
+    "hash_queue_depth": 500,
+    "hash_max_reintroductions": 3,
+
+    "shutdown_hash_budget_seconds": 5.0,
+    "shutdown_report_reserve_seconds": 1.0
 }

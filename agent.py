@@ -554,6 +554,29 @@ def heartbeat_loop(
             delay = backoff.record_failure()
             stop_event.wait(timeout=delay)
 
+# Traducerea dintre numele din config.json și parametrii lui FileMonitor.
+#
+# Cele două vocabulare sunt deliberat diferite: config-ul e citit de un
+# operator și spune „ce reglez" cu unitatea în nume (hash_max_file_size_bytes),
+# iar parametrul e citit de un programator, în contextul clasei care îl
+# folosește (max_file_size_bytes pe hasher). Tabelul e singurul loc unde cele
+# două se întâlnesc.
+#
+# Cheile trebuie să fie exact cele validate de config_loader — dacă cineva
+# adaugă un reglaj într-un singur loc, cheia ori e validată și nefolosită, ori
+# folosită și nevalidată. tests/test_file_pipeline_tuning.py păzește asta.
+FILE_PIPELINE_CONFIG_TO_PARAMETER = {
+    "settle_quiet_seconds": "quiet_seconds",
+    "settle_max_wait_seconds": "max_wait_seconds",
+    "release_poll_seconds": "release_poll_seconds",
+    "shutdown_report_reserve_seconds": "report_reserve_seconds",
+    "shutdown_hash_budget_seconds": "shutdown_budget_seconds",
+    "hash_max_file_size_bytes": "max_file_size_bytes",
+    "hash_queue_depth": "max_queue_depth",
+    "hash_max_reintroductions": "max_reintroductions",
+}
+
+
 def start_file_monitoring(
     config: Dict[str, Any],
     event_callback: Callable[[Dict[str, Any]], None],
@@ -564,7 +587,22 @@ def start_file_monitoring(
     Dacă niciun director configurat nu este valid, monitorizarea nu poate porni,
     dar agentul continuă să funcționeze (heartbeat + evenimente de ciclu de viață).
     Returnează instanța pornită sau None dacă monitorizarea nu a putut porni.
+
+    Reglajele fluxului de fișiere se pasează doar dacă sunt prezente în config.
+    O cheie absentă NU devine None și nici o valoare implicită copiată aici: ea
+    lipsește din apel, iar FileMonitor folosește implicitul modulului care
+    deține reglajul. Așa, raționamentul care a ales valoarea rămâne într-un
+    singur loc, lângă codul care o consumă.
     """
+    tuning = {
+        parameter: config[config_key]
+        for config_key, parameter in FILE_PIPELINE_CONFIG_TO_PARAMETER.items()
+        if config_key in config
+    }
+
+    if tuning:
+        logger.info("File pipeline tuning from config: %s", tuning)
+
     monitor = FileMonitor(
         agent_id=config["agent_id"],
         agent_instance_id=_require_agent_instance_id(config),
@@ -572,6 +610,7 @@ def start_file_monitoring(
         recursive_monitoring=config["recursive_monitoring"],
         event_callback=event_callback,
         logger=logger,
+        **tuning,
     )
 
     try:

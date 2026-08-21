@@ -13,7 +13,14 @@ from services.file_event import (  # noqa: F401  (reexportate pentru apelanții 
     build_file_event_payload,
     normalize_file_path,
 )
-from services.file_hasher import FileHasher, HashSubmitter
+from services.file_hasher import (
+    DEFAULT_SHUTDOWN_HASH_BUDGET_SECONDS,
+    MAX_HASH_QUEUE_DEPTH,
+    MAX_HASH_REINTRODUCTIONS,
+    MAX_HASHABLE_FILE_SIZE_BYTES,
+    FileHasher,
+    HashSubmitter,
+)
 from services.settle_tracker import (
     DEFAULT_MAX_SETTLE_WAIT_SECONDS,
     DEFAULT_SETTLE_QUIET_SECONDS,
@@ -311,6 +318,14 @@ class FileMonitor:
         max_wait_seconds: float = DEFAULT_MAX_SETTLE_WAIT_SECONDS,
         release_poll_seconds: float = DEFAULT_RELEASE_POLL_SECONDS,
         report_reserve_seconds: float = DEFAULT_SHUTDOWN_REPORT_RESERVE_SECONDS,
+        # Reglajele hasher-ului. Trec prin monitor pentru că el construiește
+        # FileHasher; valorile implicite rămân cele din services/file_hasher.py,
+        # unde stă și raționamentul care le-a ales. Un apelant care nu le pasează
+        # nu trebuie să le cunoască.
+        max_file_size_bytes: int = MAX_HASHABLE_FILE_SIZE_BYTES,
+        max_queue_depth: int = MAX_HASH_QUEUE_DEPTH,
+        max_reintroductions: int = MAX_HASH_REINTRODUCTIONS,
+        shutdown_budget_seconds: float = DEFAULT_SHUTDOWN_HASH_BUDGET_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.report_reserve_seconds = report_reserve_seconds
@@ -333,6 +348,10 @@ class FileMonitor:
             agent_id=agent_id,
             agent_instance_id=agent_instance_id,
             logger=self.logger,
+            max_file_size_bytes=max_file_size_bytes,
+            max_queue_depth=max_queue_depth,
+            max_reintroductions=max_reintroductions,
+            shutdown_budget_seconds=shutdown_budget_seconds,
         )
 
         self.releaser = SettleReleaser(
