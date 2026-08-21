@@ -1,5 +1,5 @@
 {
-  "contract_version": 3,
+  "contract_version": 4,
   "title": "Contractul de fir EDR (agent <-> server)",
   "why": [
     "O cheie pe care schema serverului nu o declara nu ajunge niciodata in store: Pydantic o arunca la validare, agentul primeste 200 OK, iar campul ramane None. Serverul o logheaza acum cu numele ei (app/schemas/wire.py::WireModel), deci greseala nu mai e complet tacuta — dar logul apare abia cand un payload gresit ajunge efectiv la server, intr-o rulare reala. Contractul muta descoperirea mai devreme: la commit, in repo-ul care a gresit, ca esec de suita, inainte ca payload-ul sa fie trimis vreodata.",
@@ -39,7 +39,7 @@
       "direction": "agent -> server",
       "transport": "POST /api/events",
       "server_model": "app/schemas/event.py::EventCreateRequest",
-      "agent_builder": "agent.py::build_startup_event_payload, agent.py::build_shutdown_event_payload, services/file_monitor.py::build_file_event_payload",
+      "agent_builder": "agent.py::build_startup_event_payload, agent.py::build_shutdown_event_payload, services/file_event.py::build_file_event_payload",
       "required": [
         "agent_id",
         "event_type"
@@ -56,7 +56,7 @@
         "measurements"
       ],
       "forbidden": [],
-      "notes": "occurred_at si agent_instance_id sunt optionale doar pentru compatibilitate cu agenti vechi. Fara occurred_at, singura ordonare posibila pe server este ordinea de livrare, care contrazice ordinea reala exact cand conteaza: un eveniment produs in timpul unei pene de retea se livreaza din spool dupa evenimente mai noi. Invariante noi (v3): sha256 prezent <=> hash_status == 'ok' (impusa de EventCreateRequest, validator; incalcarea respinge cererea). file_size obligatoriu cand hash_status == 'ok' (idem) — e numaratorul metricii octeti-divulgati-vs-always-upload, nu se poate reconstrui retroactiv daca fisierul s-a schimbat. hash_status ar trebui sa insoteasca orice eveniment cu file_path, dar NU e impus ca validator: agentul curent inca trimite file_path fara hash_status (hashing-ul nu exista pana la Pas 0.2/0.3), iar un validator care respinge ar face EventDispatcher sa trateze evenimentul ca poison message si sa-l stearga din spool — pierdere de date, nu camp gol. Verificata deocamdata doar de test_event_contract.py::test_agent_builder_always_declares_hash_status_when_file_path_is_present, impotriva builder-ului, nu a traficului. Devine validator cand agentul chiar calculeaza hash-uri. event_type e o clasificare observata local de agent, pe baza evenimentului watchdog care a deschis fereastra de stabilizare — nu o afirmatie autoritara despre noutate. Fisier sters si recreat in aceeasi fereastra poate aparea ca file_created fara sa fie nou. Determinarea autoritara a noutatii (prima aparitie a acestui hash la aceasta cale) e responsabilitatea masinii de stari per fisier de pe server (Etapa 3), nu a acestei etichete. Niciun camp al carui nume contine 'content' sau 'bytes' (case-insensitive) nu are voie sa apara pe acest model: canalul de evenimente circula la fiecare fisier atins, nu doar la cele escaladate — continutul nu are voie sa existe pe el, indiferent cum va arata mai tarziu canalul de escaladare (collect_file, Etapa 3). Impus de test_event_contract.py::test_event_model_never_carries_file_content, prin forma numelui, nu lista fixa — acopera si campuri viitoare neanticipate. Garda verifica numele, nu semantica: nu opreste continut strecurat sub un nume nevinovat (ex. in description). Verificarea semantica reala vine la Etapa 3, prin reconcilierea registrului de divulgare."
+      "notes": "occurred_at si agent_instance_id sunt optionale doar pentru compatibilitate cu agenti vechi. Fara occurred_at, singura ordonare posibila pe server este ordinea de livrare, care contrazice ordinea reala exact cand conteaza: un eveniment produs in timpul unei pene de retea se livreaza din spool dupa evenimente mai noi. Invariante noi (v3): sha256 prezent <=> hash_status == 'ok' (impusa de EventCreateRequest, validator; incalcarea respinge cererea). file_size obligatoriu cand hash_status == 'ok' (idem) — e numaratorul metricii octeti-divulgati-vs-always-upload, nu se poate reconstrui retroactiv daca fisierul s-a schimbat. hash_status ar trebui sa insoteasca orice eveniment cu file_path, dar NU e impus ca validator: agentul curent inca trimite file_path fara hash_status (hashing-ul nu exista pana la Pas 0.2/0.3), iar un validator care respinge ar face EventDispatcher sa trateze evenimentul ca poison message si sa-l stearga din spool — pierdere de date, nu camp gol. Verificata deocamdata doar de test_event_contract.py::test_agent_builder_always_declares_hash_status_when_file_path_is_present, impotriva builder-ului, nu a traficului. Devine validator cand agentul chiar calculeaza hash-uri. event_type e o clasificare observata local de agent, pe baza evenimentului watchdog care a deschis fereastra de stabilizare — nu o afirmatie autoritara despre noutate. Fisier sters si recreat in aceeasi fereastra poate aparea ca file_created fara sa fie nou. Determinarea autoritara a noutatii (prima aparitie a acestui hash la aceasta cale) e responsabilitatea masinii de stari per fisier de pe server (Etapa 3), nu a acestei etichete. Niciun camp al carui nume contine 'content' sau 'bytes' (case-insensitive) nu are voie sa apara pe acest model: canalul de evenimente circula la fiecare fisier atins, nu doar la cele escaladate — continutul nu are voie sa existe pe el, indiferent cum va arata mai tarziu canalul de escaladare (collect_file, Etapa 3). Impus de test_event_contract.py::test_event_model_never_carries_file_content, prin forma numelui, nu lista fixa — acopera si campuri viitoare neanticipate. Garda verifica numele, nu semantica: nu opreste continut strecurat sub un nume nevinovat (ex. in description). Verificarea semantica reala vine la Etapa 3, prin reconcilierea registrului de divulgare. Vocabularul complet al lui hash_status: 'ok' (sha256 valid), 'unstable' (fisierul se schimba in continuare), 'unreadable' (blocat sau fara permisiuni), 'too_large' (peste plafonul de dimensiune, nu s-a incercat citirea), 'vanished' (a disparut intre detectie si hashing), 'skipped_capacity' si 'skipped_shutdown' (v4). Statusuri noi (v4), amandoua despre agent, nu despre fisier: 'skipped_capacity' — coada de hashing era plina si intrarea cea mai veche a fost degradata ca sa nu fie pierduta; 'skipped_shutdown' — agentul se oprea si bugetul de hashing la oprire a expirat. Distinctia fata de 'unstable' este esentiala si nu are voie sa se piarda: 'unstable' spune ca FISIERUL nu s-a linistit, celelalte doua spun ca AGENTUL era sub presiune sau se oprea, in timp ce fisierul putea fi perfect stabil. Confundate, registrul de divulgare de la Etapa 3 nu ar mai putea separa costul impus de obiectul observat de costul impus de observator. Numele oglindesc deliberat SettleTracker.PendingFile.forced_reason ('capacity', 'shutdown'): aceeasi cauza, acelasi nume, in ambele straturi."
     },
     "heartbeat_request": {
       "direction": "agent -> server",
@@ -113,11 +113,14 @@
       "direction": "agent -> server",
       "transport": "camp imbricat in event_create_request.measurements",
       "server_model": "app/schemas/event.py::EventMeasurements",
-      "agent_builder": "services/file_monitor.py::build_file_event_payload",
+      "agent_builder": "services/file_event.py::build_file_event_payload",
       "required": [],
-      "optional": ["settle_wait_ms", "hash_duration_ms"],
+      "optional": [
+        "settle_wait_ms",
+        "hash_duration_ms"
+      ],
       "forbidden": [],
-      "notes": "Campurile de aici descriu costul observatiei, nu obiectul observat. Invarianta: niciun camp din acest model nu are voie sa intre intr-o decizie de verdict sau de escaladare. Sunt separate structural tocmai ca sa nu se strecoare in banda de incertitudine cand ea va exista."
-}
+      "notes": "Campurile de aici descriu costul observatiei, nu obiectul observat. Invarianta: niciun camp din acest model nu are voie sa intre intr-o decizie de verdict sau de escaladare. Sunt separate structural tocmai ca sa nu se strecoare in banda de incertitudine cand ea va exista. hash_duration_ms masoara citirea care a produs rezultatul raportat. Cand un fisier este reintrodus in asteptare pentru ca s-a schimbat in timpul citirii, incercarile anterioare NU se aduna aici: latenta lor totala este deja continuta in settle_wait_ms, care se intinde de la prima observatie pana la eliberare. Adunate in ambele campuri, ar fi numarate de doua ori."
+    }
   }
 }
