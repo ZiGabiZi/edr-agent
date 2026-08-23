@@ -433,6 +433,51 @@ class AgentCredentialsTests(unittest.TestCase):
         self.assertIsNone(credentials.agent_key)
         self.assertEqual(credentials.enrollment_secret, "shared-secret")
 
+    def test_a_secret_saved_with_a_bom_is_read_cleanly(self) -> None:
+        """
+        Regresie dintr-o rulare reală, nu caz teoretic.
+
+        Fișierul provizionat cu Set-Content -Encoding utf8 din PowerShell 5.1
+        începe cu EF BB BF. Citit ca utf-8 curat, BOM-ul rămâne lipit de secret
+        — .strip() nu îl elimină, nefiind spațiu alb — iar valoarea ajunge într-un
+        antet HTTP, unde http.client o codează latin-1 și crapă cu
+        UnicodeEncodeError din adâncul lui urllib3. Excepția nu e nici
+        TransportError, nici ConfigError, deci trece prin toate ramurile de
+        tratare și oprește agentul cu un traceback despre codecuri, în care
+        fișierul cu pricina nu apare deloc.
+        """
+        self.secret_path.write_bytes("﻿shared-secret\n".encode("utf-8"))
+
+        credentials = self._credentials()
+        credentials.load()
+
+        self.assertEqual(credentials.enrollment_secret, "shared-secret")
+
+    def test_a_key_saved_with_a_bom_is_read_cleanly(self) -> None:
+        self.key_path.write_bytes("﻿issued-key\n".encode("utf-8"))
+
+        credentials = self._credentials()
+        credentials.load()
+
+        self.assertEqual(credentials.agent_key, "issued-key")
+
+    def test_a_credential_that_cannot_be_a_header_is_refused_not_crashed(self) -> None:
+        """
+        Ultima gardă înaintea rețelei.
+
+        Un fișier salvat într-o codificare exotică poate conține caractere pe
+        care antetele HTTP nu le pot purta. Agentul trebuie să le trateze ca
+        lipsă de credențială — reîncearcă, escaladează, nu pierde evenimente —
+        nu să moară cu un traceback din urllib3.
+        """
+        self.secret_path.write_text("secret-cu-☃", encoding="utf-8")
+
+        credentials = self._credentials()
+        with self.assertLogs("test-credentials", level="ERROR"):
+            credentials.load()
+
+        self.assertIsNone(credentials.enrollment_secret)
+
     def test_an_emptied_secret_file_reads_as_absent(self) -> None:
         """Fișier gol = secret consumat. Nu trebuie să reintre în circulație."""
         self.secret_path.write_text("", encoding="utf-8")

@@ -134,20 +134,74 @@ class AgentCredentials:
             )
 
     def _read_secret_file(self, path: Path, description: str) -> Optional[str]:
+        """
+        Citește un secret dintr-un fișier provizionat de un om, pe Windows.
+
+        utf-8-sig, nu utf-8: fiecare unealtă obișnuită de pe Windows scrie
+        UTF-8 CU BOM. Set-Content -Encoding utf8 din PowerShell 5.1, Notepad,
+        redirectarea în fișier — toate pun EF BB BF la început. Citit ca utf-8
+        curat, BOM-ul devine caracterul \\ufeff la începutul secretului, iar
+        .strip() NU îl elimină: nu e spațiu alb, e un caracter de format.
+
+        Ce urmează e mult mai rău decât un secret greșit. Valoarea ajunge
+        într-un antet HTTP, iar http.client codează antetele ca latin-1, unde
+        \\ufeff nu există. Rezultatul e un UnicodeEncodeError aruncat din
+        adâncul lui urllib3, care nu e nici TransportError, nici ConfigError,
+        deci trece prin toate ramurile de tratare a erorilor și oprește agentul
+        cu un traceback despre codecuri. Cauza reală — un fișier salvat cu BOM
+        — nu apare nicăieri în el.
+
+        Aceeași convenție e deja folosită de încărcătorul de contract al
+        serverului, din exact același motiv.
+        """
         if not path.exists():
             return None
 
         try:
-            content = path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8-sig")
         except OSError as error:
             self.logger.error("Could not read the %s at %s: %s", description, path, error)
             return None
+        except UnicodeDecodeError as error:
+            # Tipic: fișier salvat ca UTF-16 (Out-File fără -Encoding pe unele
+            # versiuni de PowerShell). Nu poate fi reparat aici prin ghicit.
+            self.logger.error(
+                "The %s at %s is not valid UTF-8 (%s). Save it as plain ASCII "
+                "text, without a byte order mark.",
+                description,
+                path,
+                error,
+            )
+            return None
+
+        # Plasă pentru BOM-uri care nu stau chiar pe prima poziție: un fișier
+        # editat de două ori cu unelte diferite poate purta unul după un spațiu.
+        content = content.replace("﻿", "").strip()
 
         if not content:
             # Fișier gol = secret consumat, nu secret absent. Distincția nu
             # schimbă comportamentul, dar schimbă ce caută operatorul în log.
             self.logger.info(
                 "The %s file at %s is empty (already consumed).", description, path
+            )
+            return None
+
+        # Ultima gardă, înaintea rețelei. Antetele HTTP se codează latin-1
+        # (http.client), deci orice caracter în afara lui ar exploda abia în
+        # urllib3, cu un traceback care nu numește nici fișierul, nici cauza.
+        # Aici eșecul e localizat: numele fișierului, motivul, și ce trebuie
+        # făcut. Agentul continuă fără credențială — adică se comportă exact ca
+        # unul neînrolat: reîncearcă, escaladează, și NU pierde evenimente.
+        try:
+            content.encode("latin-1")
+        except UnicodeEncodeError:
+            self.logger.error(
+                "The %s at %s contains characters that cannot be sent in an HTTP "
+                "header. The file was most likely saved with a byte order mark or "
+                "in an encoding other than ASCII. Rewrite it as plain ASCII text; "
+                "until then the agent has no usable credential.",
+                description,
+                path,
             )
             return None
 
