@@ -21,22 +21,52 @@ Politica de erori — cheia întregii corecturi:
         reîncearcă cu exponential backoff + jitter (reutilizăm
         HeartbeatBackoffController, deci și aici evităm thundering herd).
 
-    FatalTransportError (401/403/422 etc. — respins definitiv):
+    AuthenticationError (HTTP 401 — identitate nerecunoscută):
+        Stare temporară din punctul de vedere al cozii. Evenimentele rămân
+        pe disc, se face backoff, iar alarma escaladează pe timp scurs
+        (services/auth_alarm.py). Vezi mai jos de ce NU e tratat ca fatal.
+
+    IdentityMismatchError (HTTP 403 — cheie validă, dar a altui agent):
+        Nu se repară singur, deci se raportează la ERROR de la prima
+        apariție. Coada rămâne totuși intactă: evenimentele sunt reale și
+        aparțin acestei mașini; doar credențiala e greșită.
+
+    FatalTransportError (422 etc. — respins definitiv):
         Evenimentul respectiv nu va fi acceptat niciodată (ex: payload
         invalid). Este eliminat individual și logat ca eroare, altfel ar
         bloca la nesfârșit restul cozii (problema clasică "poison message").
+
+De ce eșecurile de autentificare NU golesc coada, nici măcar cu plafon:
+    Criteriul de eliminare e „proprietate a mesajului". Un payload invalid e
+    stricat oricând l-ai trimite; un 401 descrie relația agent–server la
+    momentul cererii. Confundându-le, o cheie greșită timp de câteva minute ar
+    fi șters ireversibil tot ce era în coadă, câte un eveniment pe rând.
+
+    Consecința de securitate e și mai directă: dacă spargerea autentificării ar
+    duce la ștergerea cozii, atunci pe un endpoint compromis „strică cheia" ar
+    deveni o metodă de a face dovezile să dispară de la sine. Coada crește, și e
+    corect să crească; plafonul general al spool-ului rămâne un pas separat, cu
+    propriile lui compromisuri.
 """
 
 import logging
 import threading
 from typing import Optional
 
+from services.agent_credentials import AgentCredentials
+from services.auth_alarm import (
+    DEFAULT_FIRST_ALARM_SECONDS,
+    DEFAULT_REPEAT_ALARM_SECONDS,
+    AuthFailureAlarm,
+)
 from services.backoff import HeartbeatBackoffController
 from services.event_spool import EventSpool, EventSpoolError
 from services.stop_signal import StopSignal
 from services.transport import (
     AgentNotRegisteredError,
+    AuthenticationError,
     FatalTransportError,
+    IdentityMismatchError,
     TransportError,
     send_event,
 )
@@ -67,6 +97,9 @@ class EventDispatcher(threading.Thread):
         logger: Optional[logging.Logger] = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
         idle_poll_seconds: float = DEFAULT_IDLE_POLL_SECONDS,
+        credentials: Optional[AgentCredentials] = None,
+        auth_alarm_first_seconds: float = DEFAULT_FIRST_ALARM_SECONDS,
+        auth_alarm_repeat_seconds: float = DEFAULT_REPEAT_ALARM_SECONDS,
     ):
         super().__init__(name="edr-event-dispatcher", daemon=True)
 
@@ -77,6 +110,12 @@ class EventDispatcher(threading.Thread):
         self.batch_size = batch_size
         self.idle_poll_seconds = idle_poll_seconds
 
+        # Obiectul, nu valoarea: cheia poate fi reemisă în timpul rulării (o
+        # reînrolare declanșată de directiva 'reregister'), iar dispatcher-ul
+        # trebuie să o vadă imediat. Citită o dată la construcție, ar fi rămas
+        # blocat pe cea veche și ar fi luat 401 la nesfârșit.
+        self.credentials = credentials
+
         self._wakeup = threading.Event()
         self._backoff = HeartbeatBackoffController(
             agent_id=agent_id,
@@ -84,6 +123,31 @@ class EventDispatcher(threading.Thread):
             max_delay=_DISPATCH_MAX_DELAY_SECONDS,
             logger=self.logger,
         )
+        self._auth_alarm = AuthFailureAlarm(
+            channel="Event delivery",
+            first_alarm_seconds=auth_alarm_first_seconds,
+            repeat_alarm_seconds=auth_alarm_repeat_seconds,
+            logger=self.logger,
+        )
+
+    @property
+    def agent_key(self) -> Optional[str]:
+        """Cheia curentă, citită la fiecare cerere. Vezi nota din __init__."""
+        return self.credentials.agent_key if self.credentials is not None else None
+
+    def _describe_backlog(self) -> str:
+        """
+        Detaliul atașat alarmelor: cât s-a adunat pe disc între timp.
+
+        Se calculează leneș, doar când o alarmă chiar se emite — o interogare a
+        cozii la fiecare eșec ar fi cost pur.
+        """
+        pending = self._safe_pending_count()
+
+        if pending < 0:
+            return "The spool could not be queried for its depth."
+
+        return f"{pending} event(s) are waiting in the local spool."
 
     def wake(self) -> None:
         """Trezește dispatcher-ul imediat (apelat de producător după enqueue)."""
@@ -137,16 +201,42 @@ class EventDispatcher(threading.Thread):
                 break
 
             try:
-                response = send_event(self.server_url, event_payload)
+                response = send_event(
+                    self.server_url, event_payload, agent_key=self.agent_key
+                )
                 self.spool.mark_sent(row_id)
                 sent_count += 1
                 self._backoff.record_success()
+                self._auth_alarm.record_success()
                 self.logger.info(
                     "Dispatched spooled event id=%d (%s). Server response: %s",
                     row_id,
                     event_payload.get("event_type", "unknown"),
                     response,
                 )
+
+            except AuthenticationError as error:
+                # Coada rămâne intactă. Se oprește lotul: următorul eveniment ar
+                # fi trimis cu aceeași credențială respinsă, deci ar produce
+                # doar încă un 401 și încă o linie de log.
+                self._auth_alarm.record_failure(str(error), self._describe_backlog)
+                self.spool.record_attempt(row_id)
+                self._sleep_backoff(self._backoff.record_failure())
+                break
+
+            except IdentityMismatchError as error:
+                # ERROR de la prima apariție: spre deosebire de 401, nu există
+                # scenariu în care așteptarea repară singură problema. Coada
+                # rămâne totuși intactă — evenimentele aparțin acestei mașini,
+                # doar cheia e a alteia.
+                self._auth_alarm.record_failure(
+                    str(error),
+                    self._describe_backlog,
+                    attempt_level=logging.ERROR,
+                )
+                self.spool.record_attempt(row_id)
+                self._sleep_backoff(self._backoff.record_failure())
+                break
 
             except AgentNotRegisteredError as error:
                 # Serverul nu (mai) cunoaște agentul — stare temporară.

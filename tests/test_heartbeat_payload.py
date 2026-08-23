@@ -277,7 +277,7 @@ class HeartbeatLoopSequenceTests(unittest.TestCase):
         stop_event = threading.Event()
         sent_payloads: list = []
 
-        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
             sent_payloads.append(dict(heartbeat_payload))
 
             if len(sent_payloads) == 2:
@@ -434,7 +434,7 @@ class HeartbeatResponseContractTests(unittest.TestCase):
         stop_event = _RecordingStopEvent()
         server_dictated_interval = 42
 
-        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
             stop_event.set()
             return {
                 "status": "ok",
@@ -480,7 +480,7 @@ class HeartbeatResponseContractTests(unittest.TestCase):
             with self.subTest(next_heartbeat_seconds=unusable):
                 stop_event = _RecordingStopEvent()
 
-                def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+                def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
                     stop_event.set()
                     return {
                         "status": "ok",
@@ -552,7 +552,7 @@ class HeartbeatLoopReregistrationTests(unittest.TestCase):
         attempts = {"count": 0}
         recovery_wait = {}
 
-        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload):
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
             attempts["count"] += 1
 
             if attempts["count"] <= self.FAILURES_BEFORE_RECOVERY:

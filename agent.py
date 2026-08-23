@@ -7,6 +7,12 @@ from typing import Any, Dict, Callable, Optional, TypeGuard
 from uuid import uuid4
 from pathlib import Path
 
+from services.agent_credentials import AgentCredentials
+from services.auth_alarm import (
+    DEFAULT_FIRST_ALARM_SECONDS,
+    DEFAULT_REPEAT_ALARM_SECONDS,
+    AuthFailureAlarm,
+)
 from services.event_dispatcher import EventDispatcher
 from services.event_spool import EventSpool, EventSpoolError
 from services.file_monitor import FileMonitor, FileMonitorError
@@ -16,7 +22,9 @@ from services.stop_signal import StopSignal
 from services.system_info import collect_system_info
 from services.transport import (
     AgentNotRegisteredError,
+    AuthenticationError,
     FatalTransportError,
+    IdentityMismatchError,
     TransportError,
     check_server_health,
     register_agent,
@@ -263,12 +271,72 @@ def log_system_info(system_info: Dict[str, Any]) -> None:
 # Faza de startup — rezistentă la serverul picat la pornirea agentului
 # ---------------------------------------------------------------------------
 
+def build_agent_credentials(config: Dict[str, Any]) -> AgentCredentials:
+    """
+    Construiește obiectul de credențiale și îl încarcă de pe disc.
+
+    Căile pot fi mutate din config.json (agent_key_path, enrollment_secret_path)
+    — util când agentul rulează ca serviciu și secretele trebuie să stea într-un
+    director cu ACL propriu, nu lângă cod. Cheile absente înseamnă „folosește
+    implicitul modulului", exact ca la reglajele fluxului de fișiere.
+    """
+    credentials = AgentCredentials(
+        agent_key_path=config.get("agent_key_path"),
+        enrollment_secret_path=config.get("enrollment_secret_path"),
+        logger=logger,
+    )
+    credentials.load()
+
+    return credentials
+
+
+def _auth_alarm_settings(config: Dict[str, Any]) -> Dict[str, float]:
+    """Pragurile alarmei de autentificare, cu implicitele modulului."""
+    return {
+        "first_alarm_seconds": float(
+            config.get("auth_alarm_first_seconds", DEFAULT_FIRST_ALARM_SECONDS)
+        ),
+        "repeat_alarm_seconds": float(
+            config.get("auth_alarm_repeat_seconds", DEFAULT_REPEAT_ALARM_SECONDS)
+        ),
+    }
+
+
+def _adopt_issued_credentials(
+    register_response: Dict[str, Any],
+    credentials: Optional[AgentCredentials],
+) -> None:
+    """
+    Preia cheia emisă de server, dacă înregistrarea a fost o înrolare.
+
+    Absența lui agent_key din răspuns NU e o eroare: înseamnă că serverul a
+    acceptat cererea pe baza cheii pe care agentul o are deja (re-înregistrare)
+    și, deliberat, nu rotește nimic. O rotație la fiecare restart de server ar
+    schimba credențialele întregului parc din reflex, iar fereastra în care o
+    scriere pe disc eșuată lasă agentul fără cheie s-ar deschide la fel de des.
+
+    Consumarea secretului de înrolare se face DUPĂ adoptarea cheii și numai pe
+    calea asta: e definiția lui „prima folosire reușită".
+    """
+    if credentials is None:
+        return
+
+    issued_key = register_response.get("agent_key")
+
+    if not isinstance(issued_key, str) or not issued_key.strip():
+        return
+
+    credentials.adopt_agent_key(issued_key.strip())
+    credentials.consume_enrollment_secret()
+
+
 def register_agent_with_retry(
     config: Dict[str, Any],
     server_url: str,
     system_info: Dict[str, Any],
     stop_event: StopSignal,
     warn_after_retries: int = _STARTUP_WARN_AFTER_RETRIES,
+    credentials: Optional[AgentCredentials] = None,
 ) -> bool:
     """
     Încearcă repetat să contacteze serverul și să înregistreze agentul,
@@ -290,8 +358,22 @@ def register_agent_with_retry(
     Abandonul ar goli inutil endpoint-ul de monitorizare — run_agent() sare
     peste heartbeat_loop și intră direct în finally, oprind file monitor-ul,
     dispatcher-ul și spool-ul. Singurele ieșiri sunt FatalTransportError
-    (configurare/autentificare greșită — reîncercarea nu poate ajuta) și
-    setarea stop_event (oprire cerută explicit).
+    (payload respins definitiv — reîncercarea nu poate ajuta) și setarea
+    stop_event (oprire cerută explicit).
+
+    Eșecurile de AUTENTIFICARE nu mai sunt printre ieșiri, deși erau înainte,
+    când 401/403 intrau în FatalTransportError. Motivul e ce se pierdea:
+    run_agent() pornește spool-ul și file monitor-ul ÎNAINTE de înregistrare,
+    deci un agent care abandonează aici oprește colectarea locală de evenimente
+    din cauza unei chei greșite. Cu retry + alarmă, evenimentele se adună pe
+    disc și pleacă singure în clipa în care credențiala e reparată — iar
+    operatorul e anunțat că trebuie reparată.
+
+    Credențiale:
+        Se prezintă cheia existentă dacă există, altfel secretul de înrolare.
+        La un răspuns care conține agent_key (adică o înrolare, nu o
+        re-înregistrare), cheia e adoptată, scrisă pe disc, iar secretul de
+        înrolare e consumat — prima folosire reușită e și ultima.
 
     Args:
         config: Configurația agentului.
@@ -303,6 +385,9 @@ def register_agent_with_retry(
         warn_after_retries: Pragul de eșecuri consecutive după care se loghează
                     o singură dată un avertisment de posibilă configurare
                     greșită. NU limitează numărul de reîncercări.
+        credentials: Credențialele agentului. None înseamnă „trimite fără
+                    antete de autentificare" — util în teste; contra unui
+                    server cu autentificare pornită produce 401 la nesfârșit.
 
     Returns:
         True dacă înregistrarea a reușit complet.
@@ -323,20 +408,55 @@ def register_agent_with_retry(
         logger=logger,
     )
 
+    auth_alarm = AuthFailureAlarm(
+        channel="Registration",
+        logger=logger,
+        **_auth_alarm_settings(config),
+    )
+
     while not stop_event.is_set():
         try:
             health_response = check_server_health(server_url)
             logger.info(f"Server health response: {health_response}")
 
             agent_payload = build_agent_registration_payload(config, system_info)
-            register_response = register_agent(server_url, agent_payload)
-            logger.info(f"Register response: {register_response}")
+            register_response = register_agent(
+                server_url,
+                agent_payload,
+                agent_key=credentials.agent_key if credentials else None,
+                enrollment_secret=(
+                    credentials.enrollment_secret if credentials else None
+                ),
+            )
+            # Răspunsul conține cheia în clar exact o dată în viața ei. Se
+            # loghează doar cheile dicționarului, nu conținutul: un log rotativ
+            # pe disc, citit de oricine poate citi agent.log, ar anula complet
+            # rostul permisiunilor puse pe fișierul de cheie.
+            logger.info(
+                "Register response fields: %s", sorted(register_response.keys())
+            )
 
+            _adopt_issued_credentials(register_response, credentials)
+
+            auth_alarm.record_success()
             backoff.record_success()
             return True
-        
+
+        except (AuthenticationError, IdentityMismatchError) as error:
+            # NU se abandonează. Vezi docstring-ul: abandonul ar opri și
+            # colectarea locală de evenimente, care merge deja.
+            auth_alarm.record_failure(
+                str(error),
+                attempt_level=(
+                    logging.ERROR
+                    if isinstance(error, IdentityMismatchError)
+                    else logging.WARNING
+                ),
+            )
+            stop_event.wait(timeout=backoff.record_failure())
+
         except FatalTransportError as error:
-            logger.critical(f"Permanent configuration or auth error detected: {error}")
+            logger.critical(f"Permanently rejected registration payload: {error}")
             logger.critical("Aborting startup loop. Manual intervention required.")
             return False
 
@@ -404,6 +524,7 @@ def heartbeat_loop(
     system_info: Dict[str, Any],
     heartbeat_interval_seconds: float,
     stop_event: StopSignal,
+    credentials: Optional[AgentCredentials] = None,
 ) -> None:
     """
     Rulează bucla principală a agentului cu exponential backoff și sleep responsiv.
@@ -456,12 +577,24 @@ def heartbeat_loop(
         logger=logger,
     )
 
+    auth_alarm = AuthFailureAlarm(
+        channel="Heartbeat",
+        logger=logger,
+        **_auth_alarm_settings(config),
+    )
+
     while not stop_event.is_set():
         try:
             heartbeat_sequence += 1
             heartbeat_payload = build_heartbeat_payload(config, heartbeat_sequence)
-            response = send_heartbeat(server_url, config["agent_id"], heartbeat_payload)
+            response = send_heartbeat(
+                server_url,
+                config["agent_id"],
+                heartbeat_payload,
+                agent_key=credentials.agent_key if credentials else None,
+            )
             logger.info(f"Heartbeat response: {response}")
+            auth_alarm.record_success()
 
             directive = response.get("directive") or {}
             action = directive.get("action", "none")
@@ -481,7 +614,9 @@ def heartbeat_loop(
                 logger.warning(
                     "Server requested re-registration of agent. Restarting startup loop..."
                 )
-                registered = register_agent_with_retry(config, server_url, system_info, stop_event)
+                registered = register_agent_with_retry(
+                    config, server_url, system_info, stop_event, credentials=credentials
+                )
 
                 if not registered:
                     logger.info("Re-registration aborted due to stop request.")
@@ -516,11 +651,28 @@ def heartbeat_loop(
             backoff.record_success()
             stop_event.wait(timeout=current_interval)
 
+        except (AuthenticationError, IdentityMismatchError) as error:
+            # Bucla NU se oprește, deși înainte se oprea: 401/403 intrau în
+            # FatalTransportError, iar ramura de mai jos face return, ceea ce
+            # însemna „niciun heartbeat până la repornirea procesului". Cu
+            # autentificarea pornită, o rotație de cheie prinsă la mijloc ar fi
+            # scos definitiv endpoint-ul din consolă, iar operatorul ar fi văzut
+            # o mașină moartă în loc de o credențială greșită.
+            auth_alarm.record_failure(
+                str(error),
+                attempt_level=(
+                    logging.ERROR
+                    if isinstance(error, IdentityMismatchError)
+                    else logging.WARNING
+                ),
+            )
+            stop_event.wait(timeout=backoff.record_failure())
+
         except FatalTransportError as error:
-            logger.critical(f"Permanent configuration or auth error detected: {error}")
+            logger.critical(f"Permanently rejected heartbeat payload: {error}")
             logger.critical("Aborting heartbeat loop. Manual intervention required.")
             return
-        
+
         # Plasă de siguranță, nu calea curentă: serverul actual nu întoarce
         # niciodată 404 la heartbeat, ci directiva "reregister" tratată mai sus.
         # Ramura acoperă un server de altă versiune, un proxy care întoarce 404
@@ -532,7 +684,9 @@ def heartbeat_loop(
                 "Server no longer recognizes this agent (%s). Re-registering...",
                 error,
             )
-            registered = register_agent_with_retry(config, server_url, system_info, stop_event)
+            registered = register_agent_with_retry(
+                config, server_url, system_info, stop_event, credentials=credentials
+            )
             if not registered:
                 logger.info("Re-registration failed or was aborted. Stopping heartbeat loop.")
                 return
@@ -653,6 +807,7 @@ def run_agent() -> None:
     file_monitor = None
     event_spool = None
     event_dispatcher = None
+    credentials = None
     registered = False
 
     stop_event = threading.Event()
@@ -669,6 +824,10 @@ def run_agent() -> None:
     try:
         config = load_config()
         logger.info("Agent instance id (this run): %s", ensure_agent_instance_id(config))
+
+        # Înainte de spool și de dispatcher: amândouă au nevoie de obiectul de
+        # credențiale, iar dispatcher-ul pornește înaintea înregistrării.
+        credentials = build_agent_credentials(config)
 
         server_url = config["server_url"]
         heartbeat_interval_seconds = config["heartbeat_interval_seconds"]
@@ -692,12 +851,16 @@ def run_agent() -> None:
         startup_event_payload = build_startup_event_payload(config)
 
         if event_spool is not None:
+            alarm_settings = _auth_alarm_settings(config)
             event_dispatcher = EventDispatcher(
                 spool=event_spool,
                 server_url=server_url,
                 agent_id=config["agent_id"],
                 stop_event=stop_event,
                 logger=logger,
+                credentials=credentials,
+                auth_alarm_first_seconds=alarm_settings["first_alarm_seconds"],
+                auth_alarm_repeat_seconds=alarm_settings["repeat_alarm_seconds"],
             )
             event_spool.enqueue(startup_event_payload)
             event_dispatcher.start()
@@ -706,12 +869,18 @@ def run_agent() -> None:
                 build_file_event_callback(event_spool, event_dispatcher),
             )
 
-        registered = register_agent_with_retry(config, server_url, system_info, stop_event)
+        registered = register_agent_with_retry(
+            config, server_url, system_info, stop_event, credentials=credentials
+        )
 
         if registered:
             if event_spool is None:
                 try:
-                    send_event(server_url, startup_event_payload)
+                    send_event(
+                        server_url,
+                        startup_event_payload,
+                        agent_key=credentials.agent_key,
+                    )
                 except TransportError as error:
                     logger.error(f"Could not send startup event directly: {error}")
 
@@ -721,6 +890,7 @@ def run_agent() -> None:
                 system_info,
                 heartbeat_interval_seconds,
                 stop_event,
+                credentials=credentials,
             )
 
 
@@ -789,7 +959,11 @@ def run_agent() -> None:
         if config and registered and config.get("agent_id") and server_url is not None:
             try:
                 shutdown_payload = build_shutdown_event_payload(config)
-                shutdown_response = send_event(server_url, shutdown_payload)
+                shutdown_response = send_event(
+                    server_url,
+                    shutdown_payload,
+                    agent_key=credentials.agent_key if credentials else None,
+                )
                 logger.info(f"Shutdown event response: {shutdown_response}")
 
             except TransportError as error:

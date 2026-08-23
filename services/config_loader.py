@@ -50,6 +50,28 @@ FILE_PIPELINE_TUNABLES: Dict[str, Any] = {
     "hash_max_reintroductions": ((int,), True),
 }
 
+# Reglajele alarmei de autentificare — tabel SEPARAT de cel de mai sus, nu din
+# comoditate: FILE_PIPELINE_TUNABLES e legat unu-la-unu de tabelul de traducere
+# din agent.py (FILE_PIPELINE_CONFIG_TO_PARAMETER), iar echivalența celor două
+# e păzită de test. O cheie de autentificare strecurată acolo ar fi picat testul
+# fără să existe vreo problemă reală.
+#
+# Zero nu e permis pentru niciuna: un prag de zero ar însemna alarmă CRITICAL la
+# prima cerere respinsă, adică exact zgomotul pe care escaladarea pe timp există
+# ca să-l evite. Vezi services/auth_alarm.py.
+AUTH_TUNABLES: Dict[str, Any] = {
+    # După cât timp de eșec neîntrerupt se emite primul semnal CRITICAL.
+    "auth_alarm_first_seconds": ((int, float), False),
+    # La ce interval se repetă semnalul, cu adâncimea cozii, cât timp durează.
+    "auth_alarm_repeat_seconds": ((int, float), False),
+}
+
+# Căile fișierelor de credențiale. Nevalidate ca reglaje numerice, ci ca șiruri
+# nevide: valoarea implicită (lângă agent.py) e stabilită de
+# services/agent_credentials.py, iar o cheie absentă înseamnă „folosește
+# implicitul modulului", exact ca la fluxul de fișiere.
+CREDENTIAL_PATH_KEYS = ("agent_key_path", "enrollment_secret_path")
+
 
 class ConfigError(Exception):
     """Eroare ridicată atunci când fișierul de configurare este invalid sau lipsește."""
@@ -86,21 +108,35 @@ def validate_config(config: Dict[str, Any]) -> None:
         if not isinstance(recursive_monitoring, bool):
             invalid_keys.append("recursive_monitoring")
 
-    for key, (accepted_types, zero_allowed) in FILE_PIPELINE_TUNABLES.items():
+    for table in (FILE_PIPELINE_TUNABLES, AUTH_TUNABLES):
+        for key, (accepted_types, zero_allowed) in table.items():
+            if key not in config:
+                continue
+
+            value = config[key]
+
+            # bool înaintea tipurilor: în Python bool e subclasă de int, deci un
+            # true din JSON ar trece drept 1 și ar deveni o cadență de o secundă
+            # sau o coadă de un fișier. Aceeași greșeală a fost deja reparată o
+            # dată, pentru heartbeat_interval_seconds.
+            if isinstance(value, bool) or not isinstance(value, accepted_types):
+                invalid_keys.append(key)
+                continue
+
+            if value < 0 or (value == 0 and not zero_allowed):
+                invalid_keys.append(key)
+
+    for key in CREDENTIAL_PATH_KEYS:
         if key not in config:
             continue
 
         value = config[key]
 
-        # bool înaintea tipurilor: în Python bool e subclasă de int, deci un
-        # true din JSON ar trece drept 1 și ar deveni o cadență de o secundă
-        # sau o coadă de un fișier. Aceeași greșeală a fost deja reparată o
-        # dată, pentru heartbeat_interval_seconds.
-        if isinstance(value, bool) or not isinstance(value, accepted_types):
-            invalid_keys.append(key)
-            continue
-
-        if value < 0 or (value == 0 and not zero_allowed):
+        # Un șir gol ar fi ajuns la Path(""), adică directorul curent — iar
+        # agentul ar fi încercat să citească un secret dintr-un director și să
+        # scrie unul peste el. Eșecul ar fi apărut ca IsADirectoryError, la
+        # kilometri de cauză.
+        if not isinstance(value, str) or not value.strip():
             invalid_keys.append(key)
 
     errors = []

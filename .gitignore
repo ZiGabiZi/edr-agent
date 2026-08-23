@@ -6,3 +6,8 @@ __pycache__
 .claude/
 *.db
 event_spool.db*
+# Secrete de autentificare - nu au ce cauta in istoric sau in backup-uri partajate
+agent_key
+agent_key.tmp
+enrollment_secret
+enrollment_secret.tmp

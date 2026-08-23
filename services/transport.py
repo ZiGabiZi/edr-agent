@@ -8,6 +8,12 @@ from requests.exceptions import RequestException, Timeout, ConnectionError as Re
 
 DEFAULT_TIMEOUT_SECONDS = 5
 
+# Antetele de autentificare. Numele trebuie să corespundă exact celor din
+# edr-server/app/services/auth_service.py — o literă greșită aici nu produce o
+# eroare de import, ci un 401 permanent care arată ca o cheie greșită.
+AGENT_KEY_HEADER = "X-Agent-Key"
+ENROLLMENT_SECRET_HEADER = "X-Enrollment-Secret"
+
 
 class TransportError(Exception):
     """Eroare ridicată atunci când comunicarea cu serverul EDR eșuează."""
@@ -15,10 +21,64 @@ class TransportError(Exception):
 
 class FatalTransportError(TransportError):
     """
-    Eroare irecuperabilă (ex: 401 Unauthorized, 403 Forbidden, 409 Conflict).
-    Agentul trebuie să se oprească imediat, deoarece continuarea ar fi inutilă.
+    Eroare irecuperabilă: cererea nu va fi acceptată niciodată în forma asta
+    (ex: 422 payload invalid, 409 conflict de identitate de mașină).
+
+    Criteriul e „proprietate a mesajului", nu „cod 4xx". Un payload stricat nu
+    devine valid dacă îl mai trimiți o dată, deci păstrarea lui în coadă ar
+    bloca la nesfârșit tot ce vine după el.
+
+    401 și 403 NU mai intră aici, deși sunt 4xx — vezi AuthenticationError.
     """
     pass
+
+
+class AuthenticationError(TransportError):
+    """
+    Serverul nu recunoaște identitatea agentului (HTTP 401).
+
+    Stare TEMPORARĂ, tratată ca atare: evenimentele rămân în coadă și se
+    reîncearcă. Motivul e că 401 nu descrie mesajul, ci relația dintre agent și
+    server la momentul cererii — și poate fi adevărat acum și fals peste zece
+    minute, din cauze care n-au nimic de-a face cu evenimentul:
+
+        - cheia a fost rotită, iar fișierul local n-a apucat să se actualizeze;
+        - serverul a repornit cu un depozit de chei nou sau corupt;
+        - o greșeală de deploy sau de tastare, reparată în câteva minute.
+
+    De ce contează clasificarea, concret: până la comitul care a introdus
+    excepția asta, 401 era FatalTransportError, iar EventDispatcher trata orice
+    eroare fatală ca poison message și ștergea evenimentul din spool. Cu
+    autentificarea pornită, cinci minute de cheie greșită ar fi șters ireversibil
+    tot ce era în coadă — spool-ul persistent, construit ca să garanteze
+    at-least-once, ar fi devenit at-most-once exact când ceva era stricat.
+
+    Nici tratarea ca AgentNotRegisteredError nu era corectă: acolo recuperarea e
+    automată (heartbeat-ul re-înregistrează). O cheie revocată intenționat nu se
+    repară singură niciodată, deci tăcerea ar fi la fel de greșită ca ștergerea.
+    De aceea recuperarea e „păstrează și escaladează în timp" —
+    services/auth_alarm.py.
+    """
+    pass
+
+
+class IdentityMismatchError(TransportError):
+    """
+    Identitate acceptată, acțiune refuzată (HTTP 403).
+
+    Serverul recunoaște cheia, dar ea nu aparține agent_id-ului din cerere.
+    Cazul tipic e fișierul de cheie al unei mașini copiat pe alta — o clonă de
+    imagine, o restaurare greșită, un deploy manual.
+
+    Nu se repară de la sine, dar tot NU e o proprietate a evenimentului:
+    evenimentele sunt reale și aparțin mașinii care le-a produs; doar
+    credențiala e greșită. Se păstrează în coadă și se raportează la nivel de
+    ERROR de la prima apariție, pentru că spre deosebire de 401 aici nu există
+    scenariu în care așteptarea rezolvă singură problema.
+    """
+    pass
+
+
 class AgentNotRegisteredError(TransportError):
     """
     Serverul nu recunoaște agentul (HTTP 404 — agent inexistent în store,
@@ -56,11 +116,42 @@ def parse_json_response(response: Response) -> Dict[str, Any]:
         raise TransportError("Server returned a non-JSON response") from error
 
 
+def build_auth_headers(
+    agent_key: Optional[str] = None,
+    enrollment_secret: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Construiește antetele de autentificare pentru o cerere.
+
+    Ambele pot fi prezente simultan, deliberat: la o reînrolare (cheia de pe
+    disc s-a pierdut, dar secretul de înrolare a fost reprovizionat) serverul
+    verifică întâi secretul, deci prezența cheii vechi nu blochează emiterea
+    uneia noi. Vezi authorize_registration() pe server pentru ordine.
+    """
+    headers: Dict[str, str] = {}
+
+    if agent_key:
+        headers[AGENT_KEY_HEADER] = agent_key
+
+    if enrollment_secret:
+        headers[ENROLLMENT_SECRET_HEADER] = enrollment_secret
+
+    return headers
+
+
 def handle_response(response: Response) -> Dict[str, Any]:
     """
     Verifică status code-ul HTTP și întoarce răspunsul JSON.
 
-    Dacă serverul întoarce eroare 4xx/5xx, se ridică TransportError.
+    Clasificarea erorilor e împărțită pe cauză, nu pe familie de coduri, pentru
+    că apelantul face lucruri ireversibile pe baza ei (EventDispatcher șterge
+    evenimente la eroare fatală):
+
+        401 -> AuthenticationError     — identitate nerecunoscută, recuperabilă
+        403 -> IdentityMismatchError   — identitate acceptată, acțiune refuzată
+        404 -> AgentNotRegisteredError — agent pierdut de server, recuperabil
+        alt 4xx (fără 408/429) -> FatalTransportError — mesajul e stricat
+        restul -> TransportError       — temporar (rețea, 5xx, throttling)
     """
     try:
         response.raise_for_status()
@@ -69,6 +160,16 @@ def handle_response(response: Response) -> Dict[str, Any]:
             error_detail = response.json()
         except ValueError:
             error_detail = response.text
+
+        if response.status_code == 401:
+            raise AuthenticationError(
+                f"Agent identity not recognized by server (HTTP 401): {error_detail}"
+            ) from error
+
+        if response.status_code == 403:
+            raise IdentityMismatchError(
+                f"Agent key does not authorize this agent_id (HTTP 403): {error_detail}"
+            ) from error
 
         if response.status_code == 404:
             raise AgentNotRegisteredError(
@@ -92,6 +193,7 @@ def get_request(
     endpoint: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     session: Optional[Session] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Trimite o cerere HTTP GET către serverul EDR.
@@ -100,7 +202,7 @@ def get_request(
     client = session or requests
 
     try:
-        response = client.get(url, timeout=timeout)
+        response = client.get(url, timeout=timeout, headers=headers)
         return handle_response(response)
     except Timeout as error:
         raise TransportError(f"GET request timed out: {url}") from error
@@ -116,6 +218,7 @@ def post_request(
     payload: Dict[str, Any],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     session: Optional[Session] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Trimite o cerere HTTP POST cu payload JSON către serverul EDR.
@@ -124,7 +227,7 @@ def post_request(
     client = session or requests
 
     try:
-        response = client.post(url, json=payload, timeout=timeout)
+        response = client.post(url, json=payload, timeout=timeout, headers=headers)
         return handle_response(response)
     except Timeout as error:
         raise TransportError(f"POST request timed out: {url}") from error
@@ -144,29 +247,54 @@ def check_server_health(server_url: str) -> Dict[str, Any]:
     return get_request(server_url, "/health")
 
 
-def register_agent(server_url: str, agent_payload: Dict[str, Any]) -> Dict[str, Any]:
+def register_agent(
+    server_url: str,
+    agent_payload: Dict[str, Any],
+    agent_key: Optional[str] = None,
+    enrollment_secret: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Înregistrează agentul endpoint la serverul EDR.
 
     Apelează:
     POST /api/agents/register
+
+    Credențialele sunt opționale în semnătură, nu în practică: un server cu
+    autentificare pornită refuză cu 401 o înregistrare fără niciuna. Valoarea
+    implicită None există ca modulul să rămână utilizabil în testele care nu au
+    treabă cu autentificarea.
     """
-    return post_request(server_url, "/api/agents/register", agent_payload)
+    return post_request(
+        server_url,
+        "/api/agents/register",
+        agent_payload,
+        headers=build_auth_headers(agent_key, enrollment_secret),
+    )
 
 
-def send_event(server_url: str, event_payload: Dict[str, Any]) -> Dict[str, Any]:
+def send_event(
+    server_url: str,
+    event_payload: Dict[str, Any],
+    agent_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Trimite un eveniment de la agent către serverul EDR.
 
     Apelează:
     POST /api/events
     """
-    return post_request(server_url, "/api/events", event_payload)
+    return post_request(
+        server_url,
+        "/api/events",
+        event_payload,
+        headers=build_auth_headers(agent_key),
+    )
 
 def send_heartbeat(
         server_url: str,
         agent_id: str,
-        heartbeat_payload: Optional[Dict[str, Any]] = None
+        heartbeat_payload: Optional[Dict[str, Any]] = None,
+        agent_key: Optional[str] = None,
         ) -> Dict[str, Any]:
     """
     Trimite un heartbeat de la agent către serverul EDR.
@@ -181,5 +309,6 @@ def send_heartbeat(
     return post_request(
         server_url,
         f"/api/agents/{encoded_agent_id}/heartbeat",
-        payload
+        payload,
+        headers=build_auth_headers(agent_key),
     )

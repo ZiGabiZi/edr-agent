@@ -17,5 +17,8 @@
     "hash_max_reintroductions": 3,
 
     "shutdown_hash_budget_seconds": 5.0,
-    "shutdown_report_reserve_seconds": 1.0
+    "shutdown_report_reserve_seconds": 1.0,
+
+    "auth_alarm_first_seconds": 300.0,
+    "auth_alarm_repeat_seconds": 1800.0
 }
