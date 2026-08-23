@@ -261,6 +261,51 @@ class DispatcherQueueTests(unittest.TestCase):
 
         self.assertEqual(len(attempts), 1)
 
+    def test_the_dispatcher_picks_up_a_credential_fixed_on_disk(self) -> None:
+        """
+        Recuperare fără repornire, de la un capăt la altul.
+
+        Prima încercare eșuează cu 401; între timp operatorul scrie cheia pe
+        disc; a doua încercare o folosește și reușește. Fără recitirea din
+        ramura de eroare, dispatcher-ul ar fi reluat la nesfârșit cu aceeași
+        credențială respinsă, iar coada s-ar fi golit doar la repornirea
+        procesului.
+        """
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        key_path = Path(directory.name) / "agent_key"
+
+        credentials = AgentCredentials(
+            agent_key_path=key_path,
+            enrollment_secret_path=Path(directory.name) / "enrollment_secret",
+        )
+        credentials.load()
+
+        spool = FakeSpool([{"n": 1}])
+        # Fără trip_after_waits: testul are nevoie de DOUĂ loturi consecutive,
+        # iar un semnal de oprire declanșat de așteptarea de backoff a primului
+        # ar face ca al doilea să iasă înainte de prima încercare.
+        dispatcher = _make_dispatcher(spool, FakeStopEvent())
+        dispatcher.credentials = credentials
+
+        used: List[Optional[str]] = []
+
+        def refuse_then_accept(server_url, payload, agent_key=None):
+            used.append(agent_key)
+            if agent_key is None:
+                # Operatorul pune fișierul exact între cele două încercări.
+                key_path.write_text("cheia-corecta\n", encoding="utf-8")
+                raise AuthenticationError("HTTP 401")
+            return {"ok": True}
+
+        with patch("services.event_dispatcher.send_event", refuse_then_accept):
+            dispatcher._dispatch_batch()
+            dispatched = dispatcher._dispatch_batch()
+
+        self.assertEqual(used, [None, "cheia-corecta"])
+        self.assertEqual(dispatched, 1)
+        self.assertEqual(spool.marked_sent, [1])
+
     def test_the_dispatcher_sends_the_current_key_not_a_snapshot(self) -> None:
         """
         Cheia se citește la fiecare cerere. Dacă dispatcher-ul ar fi reținut
@@ -523,6 +568,59 @@ class AgentCredentialsTests(unittest.TestCase):
         self.assertEqual(credentials.enrollment_secret, "shared-secret")
         self.assertTrue(self.secret_path.exists())
         self.assertIsNone(credentials.agent_key)
+
+    def test_a_secret_provisioned_while_running_is_picked_up(self) -> None:
+        """
+        Scenariul de pe un endpoint proaspăt instalat, reprodus.
+
+        Agentul pornește fără nicio credențială, ia 401, iar operatorul pune
+        fișierul cu secretul în timp ce procesul rulează. Fără recitire, bucla
+        ar reîncerca la nesfârșit cu aceleași credențiale inexistente, iar
+        singura ieșire ar fi repornirea — adică exact opusul motivului pentru
+        care nu abandonăm la 401.
+        """
+        credentials = self._credentials()
+        credentials.load()
+        self.assertIsNone(credentials.enrollment_secret)
+
+        self.secret_path.write_text("provizionat-tarziu\n", encoding="utf-8")
+
+        self.assertTrue(credentials.refresh_from_disk())
+        self.assertEqual(credentials.enrollment_secret, "provizionat-tarziu")
+
+    def test_a_replaced_key_is_picked_up(self) -> None:
+        self.key_path.write_text("cheie-veche\n", encoding="utf-8")
+        credentials = self._credentials()
+        credentials.load()
+
+        self.key_path.write_text("cheie-noua\n", encoding="utf-8")
+
+        self.assertTrue(credentials.refresh_from_disk())
+        self.assertEqual(credentials.agent_key, "cheie-noua")
+
+    def test_refresh_reports_no_change_when_disk_matches_memory(self) -> None:
+        """Fără asta, fiecare reîncercare ar produce o linie de log inutilă."""
+        self.key_path.write_text("aceeasi-cheie\n", encoding="utf-8")
+        credentials = self._credentials()
+        credentials.load()
+
+        self.assertFalse(credentials.refresh_from_disk())
+
+    def test_refresh_never_wipes_a_key_held_only_in_memory(self) -> None:
+        """
+        Garda care face diferența dintre adoptă și sincronizează.
+
+        adopt_agent_key() păstrează cheia în memorie chiar dacă scrierea pe disc
+        a eșuat — un disc plin nu are voie să producă un agent mut. O recitire
+        care ar sincroniza orbește ar arunca exact acea copie funcțională, la
+        primul 401, transformând o eroare recuperabilă într-una definitivă.
+        """
+        credentials = self._credentials()
+        credentials._agent_key = "cheie-doar-in-memorie"
+
+        self.assertFalse(self.key_path.exists())
+        self.assertFalse(credentials.refresh_from_disk())
+        self.assertEqual(credentials.agent_key, "cheie-doar-in-memorie")
 
     def test_an_enrollment_response_adopts_and_consumes(self) -> None:
         self.secret_path.write_text("shared-secret\n", encoding="utf-8")

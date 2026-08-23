@@ -133,6 +133,51 @@ class AgentCredentials:
                 self.enrollment_secret_path,
             )
 
+    def refresh_from_disk(self) -> bool:
+        """
+        Recitește fișierele și adoptă ce găsește, fără să șteargă nimic.
+
+        De ce e nevoie de ea, deși load() rulează deja la pornire:
+            Agentul nu abandonează la un eșec de autentificare tocmai ca
+            operatorul să poată repara problema, iar agentul să-și revină
+            singur. Dar când reparația ESTE punerea fișierului la locul lui —
+            cazul cel mai frecvent, un endpoint proaspăt instalat fără secret —
+            un agent care citește credențialele o singură dată nu o observă
+            niciodată. Bucla reîncearcă la infinit exact în scenariul pentru
+            care a fost proiectată, iar singura ieșire e repornirea procesului.
+
+        Regula e ADOPTĂ, nu sincroniza. O valoare nevidă de pe disc înlocuiește
+        ce e în memorie; o valoare absentă NU golește memoria. Diferența e
+        esențială: adopt_agent_key() păstrează cheia în memorie chiar dacă
+        scrierea pe disc a eșuat, iar o sincronizare oarbă ar fi aruncat singura
+        copie funcțională a credențialei la prima recitire — transformând o
+        eroare de disc recuperabilă într-un agent mut.
+
+        Se apelează doar după un eșec de autentificare, deci de cel mult câteva
+        ori pe minut: încercările sunt distanțate de backoff exponențial.
+
+        Returns:
+            True dacă vreo valoare s-a schimbat. Apelantul decide dacă loghează,
+            ca să nu producă o linie la fiecare reîncercare.
+        """
+        agent_key = self._read_secret_file(self.agent_key_path, "agent key")
+        enrollment_secret = self._read_secret_file(
+            self.enrollment_secret_path, "enrollment secret"
+        )
+
+        with self._lock:
+            changed = False
+
+            if agent_key and agent_key != self._agent_key:
+                self._agent_key = agent_key
+                changed = True
+
+            if enrollment_secret and enrollment_secret != self._enrollment_secret:
+                self._enrollment_secret = enrollment_secret
+                changed = True
+
+            return changed
+
     def _read_secret_file(self, path: Path, description: str) -> Optional[str]:
         """
         Citește un secret dintr-un fișier provizionat de un om, pe Windows.

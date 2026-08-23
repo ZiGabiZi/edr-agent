@@ -135,6 +135,24 @@ class EventDispatcher(threading.Thread):
         """Cheia curentă, citită la fiecare cerere. Vezi nota din __init__."""
         return self.credentials.agent_key if self.credentials is not None else None
 
+    def _reload_credentials(self) -> None:
+        """
+        Recitește credențialele după un refuz, ca reîncercarea să poată reuși.
+
+        Fără pasul ăsta, dispatcher-ul ar relua la nesfârșit cu exact aceeași
+        credențială respinsă: singura cale prin care coada s-ar goli după o
+        reparație ar fi repornirea procesului agent — adică fix ce nu vrem, cât
+        timp firul de hashing și cel de observare rulează și produc evenimente.
+        """
+        if self.credentials is None:
+            return
+
+        if self.credentials.refresh_from_disk():
+            self.logger.warning(
+                "Event delivery: credentials changed on disk and were picked up; "
+                "the next delivery attempt will use them."
+            )
+
     def _describe_backlog(self) -> str:
         """
         Detaliul atașat alarmelor: cât s-a adunat pe disc între timp.
@@ -219,6 +237,7 @@ class EventDispatcher(threading.Thread):
                 # Coada rămâne intactă. Se oprește lotul: următorul eveniment ar
                 # fi trimis cu aceeași credențială respinsă, deci ar produce
                 # doar încă un 401 și încă o linie de log.
+                self._reload_credentials()
                 self._auth_alarm.record_failure(str(error), self._describe_backlog)
                 self.spool.record_attempt(row_id)
                 self._sleep_backoff(self._backoff.record_failure())
@@ -229,6 +248,7 @@ class EventDispatcher(threading.Thread):
                 # scenariu în care așteptarea repară singură problema. Coada
                 # rămâne totuși intactă — evenimentele aparțin acestei mașini,
                 # doar cheia e a alteia.
+                self._reload_credentials()
                 self._auth_alarm.record_failure(
                     str(error),
                     self._describe_backlog,

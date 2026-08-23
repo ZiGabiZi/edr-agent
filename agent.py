@@ -302,6 +302,32 @@ def _auth_alarm_settings(config: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
+def _reload_credentials_after_auth_failure(
+    credentials: Optional[AgentCredentials],
+    channel: str,
+) -> None:
+    """
+    Recitește credențialele de pe disc după un refuz de autentificare.
+
+    Momentul e ales, nu întâmplător: un eșec de autentificare e singura situație
+    în care recitirea are sens, și e exact situația în care operatorul tocmai a
+    pus fișierul la locul lui sau a înlocuit o cheie greșită. În rest, discul nu
+    are ce să spună în plus față de memorie.
+
+    Se loghează doar când chiar s-a schimbat ceva. O linie la fiecare
+    reîncercare ar îneca exact alarma care trebuie citită.
+    """
+    if credentials is None:
+        return
+
+    if credentials.refresh_from_disk():
+        logger.warning(
+            "%s: credentials changed on disk and were picked up; the next attempt "
+            "will use them.",
+            channel,
+        )
+
+
 def _adopt_issued_credentials(
     register_response: Dict[str, Any],
     credentials: Optional[AgentCredentials],
@@ -445,6 +471,13 @@ def register_agent_with_retry(
         except (AuthenticationError, IdentityMismatchError) as error:
             # NU se abandonează. Vezi docstring-ul: abandonul ar opri și
             # colectarea locală de evenimente, care merge deja.
+            #
+            # Recitirea de aici e ce face din reîncercare o cale de recuperare
+            # reală: cazul obișnuit e un endpoint proaspăt instalat pe care
+            # cineva tocmai a pus fișierul cu secretul de înrolare. Fără ea,
+            # agentul ar reîncerca la nesfârșit cu aceleași credențiale
+            # inexistente, iar singura ieșire ar fi repornirea procesului.
+            _reload_credentials_after_auth_failure(credentials, "registration")
             auth_alarm.record_failure(
                 str(error),
                 attempt_level=(
@@ -658,6 +691,7 @@ def heartbeat_loop(
             # autentificarea pornită, o rotație de cheie prinsă la mijloc ar fi
             # scos definitiv endpoint-ul din consolă, iar operatorul ar fi văzut
             # o mașină moartă în loc de o credențială greșită.
+            _reload_credentials_after_auth_failure(credentials, "Heartbeat")
             auth_alarm.record_failure(
                 str(error),
                 attempt_level=(
