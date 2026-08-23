@@ -3,7 +3,7 @@ import signal
 import threading
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, Callable, Optional, TypeGuard
+from typing import Any, Dict, Callable, NamedTuple, Optional, TypeGuard
 from uuid import uuid4
 from pathlib import Path
 
@@ -290,16 +290,54 @@ def build_agent_credentials(config: Dict[str, Any]) -> AgentCredentials:
     return credentials
 
 
-def _auth_alarm_settings(config: Dict[str, Any]) -> Dict[str, float]:
+class AuthAlarmSettings(NamedTuple):
+    """
+    Pragurile alarmei de autentificare, citite din config.
+
+    Tip propriu, nu Dict[str, float], pentru că valorile astea ajung în
+    constructorul lui AuthFailureAlarm. Un dicționar despachetat acolo cu **
+    promite type checker-ului „orice parametru al constructorului, cu valoare
+    float" — inclusiv `clock`, care așteaptă un Callable[[], float]. Promisiunea
+    e falsă și nu poate fi verificată: dicționarul e opac la momentul apelului,
+    deci o cheie scrisă greșit ar deveni TypeError abia la rulare, în bucla de
+    înregistrare a unui agent din producție.
+
+    Cu un NamedTuple, fiecare câmp are tipul lui, iar apelul le trece pe nume.
+    """
+
+    first_alarm_seconds: float
+    repeat_alarm_seconds: float
+
+
+def _auth_alarm_settings(config: Dict[str, Any]) -> AuthAlarmSettings:
     """Pragurile alarmei de autentificare, cu implicitele modulului."""
-    return {
-        "first_alarm_seconds": float(
+    return AuthAlarmSettings(
+        first_alarm_seconds=float(
             config.get("auth_alarm_first_seconds", DEFAULT_FIRST_ALARM_SECONDS)
         ),
-        "repeat_alarm_seconds": float(
+        repeat_alarm_seconds=float(
             config.get("auth_alarm_repeat_seconds", DEFAULT_REPEAT_ALARM_SECONDS)
         ),
-    }
+    )
+
+
+def _build_auth_alarm(channel: str, config: Dict[str, Any]) -> AuthFailureAlarm:
+    """
+    Construiește alarma unui canal, cu pragurile din config.
+
+    Există ca cele două bucle care ridică alarme — înregistrarea și heartbeat-ul
+    — să nu repete fiecare aceeași legare de parametri. EventDispatcher NU o
+    folosește deliberat: el primește pragurile ca numere, deci rămâne
+    independent de forma fișierului de configurare.
+    """
+    settings = _auth_alarm_settings(config)
+
+    return AuthFailureAlarm(
+        channel=channel,
+        first_alarm_seconds=settings.first_alarm_seconds,
+        repeat_alarm_seconds=settings.repeat_alarm_seconds,
+        logger=logger,
+    )
 
 
 def _reload_credentials_after_auth_failure(
@@ -434,11 +472,7 @@ def register_agent_with_retry(
         logger=logger,
     )
 
-    auth_alarm = AuthFailureAlarm(
-        channel="Registration",
-        logger=logger,
-        **_auth_alarm_settings(config),
-    )
+    auth_alarm = _build_auth_alarm("Registration", config)
 
     while not stop_event.is_set():
         try:
@@ -610,11 +644,7 @@ def heartbeat_loop(
         logger=logger,
     )
 
-    auth_alarm = AuthFailureAlarm(
-        channel="Heartbeat",
-        logger=logger,
-        **_auth_alarm_settings(config),
-    )
+    auth_alarm = _build_auth_alarm("Heartbeat", config)
 
     while not stop_event.is_set():
         try:
@@ -893,8 +923,8 @@ def run_agent() -> None:
                 stop_event=stop_event,
                 logger=logger,
                 credentials=credentials,
-                auth_alarm_first_seconds=alarm_settings["first_alarm_seconds"],
-                auth_alarm_repeat_seconds=alarm_settings["repeat_alarm_seconds"],
+                auth_alarm_first_seconds=alarm_settings.first_alarm_seconds,
+                auth_alarm_repeat_seconds=alarm_settings.repeat_alarm_seconds,
             )
             event_spool.enqueue(startup_event_payload)
             event_dispatcher.start()

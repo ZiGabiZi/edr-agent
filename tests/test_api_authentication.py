@@ -35,7 +35,11 @@ from requests import Response
 import agent
 from services import transport
 from services.agent_credentials import AgentCredentials
-from services.auth_alarm import AuthFailureAlarm
+from services.auth_alarm import (
+    DEFAULT_FIRST_ALARM_SECONDS,
+    DEFAULT_REPEAT_ALARM_SECONDS,
+    AuthFailureAlarm,
+)
 from services.event_dispatcher import EventDispatcher
 from services.transport import (
     AgentNotRegisteredError,
@@ -341,6 +345,53 @@ class DispatcherQueueTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 3. Alarma
 # ---------------------------------------------------------------------------
+
+class AuthAlarmSettingsTests(unittest.TestCase):
+    """
+    Traseul reglajelor: din config.json până în alarma fiecărui canal.
+
+    Clasa de bug pe care o închid e cea mai tăcută dintre toate: o cheie poate
+    exista în config, poate fi validată la încărcare, și totuși nimeni să n-o
+    citească. Agentul pornește, pare configurat, și rulează pe implicit.
+    Aceeași gardă există deja pentru reglajele fluxului de fișiere.
+
+    Al doilea motiv e tipul. Pragurile ajung în constructorul lui
+    AuthFailureAlarm, care are și un parametru `clock` de tip Callable. Cât timp
+    erau despachetate dintr-un dicționar cu **, orice cheie scrisă greșit ar fi
+    devenit TypeError abia la rulare, în bucla de înregistrare a unui agent din
+    producție.
+    """
+
+    def test_settings_come_from_config(self) -> None:
+        settings = agent._auth_alarm_settings(
+            {"auth_alarm_first_seconds": 30, "auth_alarm_repeat_seconds": 90}
+        )
+
+        self.assertEqual(settings.first_alarm_seconds, 30.0)
+        self.assertEqual(settings.repeat_alarm_seconds, 90.0)
+        self.assertIsInstance(settings.first_alarm_seconds, float)
+
+    def test_absent_keys_fall_back_to_the_module_defaults(self) -> None:
+        """
+        O cheie lipsă înseamnă „folosește implicitul modulului", nu None și nici
+        o a doua copie a valorii ținută în alt fișier.
+        """
+        settings = agent._auth_alarm_settings({})
+
+        self.assertEqual(settings.first_alarm_seconds, DEFAULT_FIRST_ALARM_SECONDS)
+        self.assertEqual(settings.repeat_alarm_seconds, DEFAULT_REPEAT_ALARM_SECONDS)
+
+    def test_both_alarm_channels_receive_the_configured_thresholds(self) -> None:
+        config = {"auth_alarm_first_seconds": 12, "auth_alarm_repeat_seconds": 34}
+
+        for channel in ("Registration", "Heartbeat"):
+            with self.subTest(channel=channel):
+                alarm = agent._build_auth_alarm(channel, config)
+
+                self.assertEqual(alarm.channel, channel)
+                self.assertEqual(alarm.first_alarm_seconds, 12.0)
+                self.assertEqual(alarm.repeat_alarm_seconds, 34.0)
+
 
 class AuthAlarmTests(unittest.TestCase):
     def _alarm(self, clock: FakeClock) -> AuthFailureAlarm:
