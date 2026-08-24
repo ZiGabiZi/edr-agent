@@ -345,10 +345,15 @@ class AgentCredentials:
 
             self._restrict_permissions(temporary_path)
             os.replace(temporary_path, path)
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            # ValueError pe langa OSError: calea vine din config.json prin
+            # agent_key_path, iar un octet nul acolo face ca os.open sa ridice
+            # ValueError inainte sa atinga discul. Netratata, ar fi iesit din
+            # adopt_agent_key si ar fi oprit agentul chiar in clipa in care
+            # inrolarea reusise.
             try:
                 temporary_path.unlink(missing_ok=True)
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
             raise AgentCredentialsError(

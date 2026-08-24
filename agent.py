@@ -8,6 +8,7 @@ from uuid import uuid4
 from pathlib import Path
 
 from services.agent_credentials import AgentCredentials
+from services.agent_identity import resolve_agent_id
 from services.auth_alarm import (
     DEFAULT_FIRST_ALARM_SECONDS,
     DEFAULT_REPEAT_ALARM_SECONDS,
@@ -896,12 +897,18 @@ def run_agent() -> None:
         server_url = config["server_url"]
         heartbeat_interval_seconds = config["heartbeat_interval_seconds"]
 
-        logger.info(f"Loaded configuration for agent_id={config['agent_id']}")
         logger.info(f"Server URL: {server_url}")
         logger.info(f"Heartbeat interval: {heartbeat_interval_seconds} seconds")
 
         system_info = collect_system_info(server_url)
         log_system_info(system_info)
+
+        # Identitatea se stabilește DUPĂ colectarea informațiilor de sistem,
+        # pentru că derivarea are nevoie de hostname și de amprenta mașinii.
+        # De aceea și linia de log care o anunță s-a mutat mai jos: înainte,
+        # agent_id venea garantat din config.json și putea fi afișat imediat.
+        resolve_agent_id(config, system_info)
+        logger.info(f"Loaded configuration for agent_id={config['agent_id']}")
 
         try:
             event_spool = EventSpool(logger=logger)

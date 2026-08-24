@@ -5,7 +5,18 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 
-REQUIRED_CONFIG_KEYS = ["agent_id", "server_url", "agent_version"]
+REQUIRED_CONFIG_KEYS = ["server_url", "agent_version"]
+
+# agent_id NU mai e obligatoriu. Scris fix în config.json, el se copia odată cu
+# fișierul pe fiecare mașină nouă, iar a doua desfășurare revendica un nume deja
+# legat de altă amprentă de mașină: serverul întorcea 409, agentul clasifica 409
+# ca eroare fatală și se oprea la pornire. Absent, e derivat din hostname și
+# amprenta mașinii și înghețat local — vezi services/agent_identity.py.
+#
+# Prezent, rămâne decizia operatorului și bate tot; se validează la fel ca
+# înainte, ca șir nevid.
+OPTIONAL_STRING_CONFIG_KEYS = ["agent_id"]
+
 _BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = _BASE_DIR / "config.json"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 10
@@ -66,11 +77,20 @@ AUTH_TUNABLES: Dict[str, Any] = {
     "auth_alarm_repeat_seconds": ((int, float), False),
 }
 
-# Căile fișierelor de credențiale. Nevalidate ca reglaje numerice, ci ca șiruri
-# nevide: valoarea implicită (lângă agent.py) e stabilită de
-# services/agent_credentials.py, iar o cheie absentă înseamnă „folosește
+# Căile fișierelor de stare locală a mașinii: credențialele și identitatea.
+# Nevalidate ca reglaje numerice, ci ca șiruri nevide. Valorile implicite stau
+# lângă codul care le folosește (services/agent_credentials.py,
+# services/agent_identity.py), iar o cheie absentă înseamnă „folosește
 # implicitul modulului", exact ca la fluxul de fișiere.
-CREDENTIAL_PATH_KEYS = ("agent_key_path", "enrollment_secret_path")
+#
+# Toate trei descriu fișiere care NU se copiază între mașini, spre deosebire de
+# config.json însuși — de aceea au căi configurabile: pe o instalare ca
+# serviciu, starea locală poate trebui să stea într-un director propriu.
+LOCAL_STATE_PATH_KEYS = (
+    "agent_key_path",
+    "enrollment_secret_path",
+    "agent_id_path",
+)
 
 
 class ConfigError(Exception):
@@ -90,6 +110,15 @@ def validate_config(config: Dict[str, Any]) -> None:
         if field not in config:
             missing_keys.append(field)
         elif not isinstance(config[field], str) or not config[field].strip():
+            invalid_keys.append(field)
+
+    for field in OPTIONAL_STRING_CONFIG_KEYS:
+        # Absent e valid; prezent dar gol nu e. Un agent_id scris ca șir gol ar
+        # trece mai departe și ar fi tratat ca absență abia în agent_identity,
+        # după ce a mimat o decizie de operator care nu s-a luat.
+        if field in config and (
+            not isinstance(config[field], str) or not config[field].strip()
+        ):
             invalid_keys.append(field)
 
     if "heartbeat_interval_seconds" in config:
@@ -126,7 +155,7 @@ def validate_config(config: Dict[str, Any]) -> None:
             if value < 0 or (value == 0 and not zero_allowed):
                 invalid_keys.append(key)
 
-    for key in CREDENTIAL_PATH_KEYS:
+    for key in LOCAL_STATE_PATH_KEYS:
         if key not in config:
             continue
 
@@ -193,7 +222,10 @@ def normalize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalizează configurația și adaugă valori implicite unde este cazul."""
     normalized_config = dict(config)
 
-    normalized_config["agent_id"] = normalized_config["agent_id"].strip()
+    # agent_id poate lipsi: atunci e derivat si inghetat local la pornire,
+    # de services/agent_identity.py. Aici doar se curata daca exista.
+    if "agent_id" in normalized_config:
+        normalized_config["agent_id"] = normalized_config["agent_id"].strip()
     normalized_config["server_url"] = normalized_config["server_url"].strip().rstrip("/")
     normalized_config["agent_version"] = normalized_config["agent_version"].strip()
 

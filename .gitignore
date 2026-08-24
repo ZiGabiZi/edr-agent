@@ -11,3 +11,5 @@ agent_key
 agent_key.tmp
 enrollment_secret
 enrollment_secret.tmp
+agent_id
+agent_id.tmp
