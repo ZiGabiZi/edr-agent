@@ -83,8 +83,16 @@ emite o cheie nouă, iar cea veche devine invalidă în aceeași clipă.
 | 401 | identitate nerecunoscută | `AuthenticationError` | păstrează coada, backoff, alarmă progresivă |
 | 403 | identitate acceptată, acțiune refuzată | `IdentityMismatchError` | păstrează coada, backoff, ERROR de la prima apariție |
 | 404 | agent necunoscut de server | `AgentNotRegisteredError` | păstrează coada, se re-înregistrează |
-| 409 | `agent_id` revendicat de altă mașină | `FatalTransportError` | abandonează înregistrarea |
+| 409 | `agent_id` revendicat de altă mașină | `IdentityConflictError` | păstrează coada, reîncearcă, ERROR de la prima apariție |
 | 422 | payload invalid | `FatalTransportError` | **aruncă evenimentul** (poison message) |
+
+409 primește același tratament ca 403, din același motiv extins: clasificat
+`FatalTransportError`, făcea `register_agent_with_retry` să întoarcă `False`, iar
+`run_agent` sărea peste bucla de heartbeat direct în `finally` — oprind file
+monitor-ul, dispatcher-ul și spool-ul. O coliziune de **nume** oprea colectarea
+de evenimente pe o mașină perfect sănătoasă, care dispărea complet din consolă.
+Pentru un EDR, tăcerea totală e cel mai prost simptom: nu se distinge de un
+endpoint oprit sau compromis.
 
 Distincția 401/403 față de 422 este esențială și a fost motivul principal
 pentru care pasul acesta a cerut proiectare separată:

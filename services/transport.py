@@ -21,14 +21,16 @@ class TransportError(Exception):
 
 class FatalTransportError(TransportError):
     """
-    Eroare irecuperabilă: cererea nu va fi acceptată niciodată în forma asta
-    (ex: 422 payload invalid, 409 conflict de identitate de mașină).
+    Eroare irecuperabilă: cererea nu va fi acceptată niciodată în forma asta.
+    Practic, azi înseamnă 422 — un payload pe care schema serverului îl refuză.
 
     Criteriul e „proprietate a mesajului", nu „cod 4xx". Un payload stricat nu
     devine valid dacă îl mai trimiți o dată, deci păstrarea lui în coadă ar
     bloca la nesfârșit tot ce vine după el.
 
-    401 și 403 NU mai intră aici, deși sunt 4xx — vezi AuthenticationError.
+    401, 403 și 409 NU mai intră aici, deși sunt 4xx. Primele două descriu
+    relația agent-server, al treilea descrie o coliziune de nume; niciunul nu
+    descrie mesajul, deci niciunul nu justifică aruncarea lui.
     """
     pass
 
@@ -75,6 +77,29 @@ class IdentityMismatchError(TransportError):
     credențiala e greșită. Se păstrează în coadă și se raportează la nivel de
     ERROR de la prima apariție, pentru că spre deosebire de 401 aici nu există
     scenariu în care așteptarea rezolvă singură problema.
+    """
+    pass
+
+
+class IdentityConflictError(TransportError):
+    """
+    agent_id-ul cerut e deja legat de altă mașină (HTTP 409).
+
+    Tipic: o mașină clonată după înrolare, care duce cu ea fișierul de
+    identitate și cheia, dar are altă amprentă de mașină.
+
+    De ce NU e FatalTransportError, deși nu se repară de la sine: eroarea fatală
+    face register_agent_with_retry să întoarcă False, iar run_agent sare atunci
+    peste bucla de heartbeat și intră direct în finally — oprind file monitor-ul,
+    dispatcher-ul și spool-ul. Adică un conflict de NUME oprea colectarea de
+    evenimente pe o mașină perfect sănătoasă, iar aceasta dispărea complet din
+    consolă: nici măcar ca agent cu probleme.
+
+    Pentru un EDR, tăcerea totală e cel mai prost simptom posibil — nu se
+    distinge de un endpoint oprit sau de unul compromis. Tratamentul e cel
+    aplicat deja la 401 și 403: rămâi pornit, colectează local, escaladează în
+    jurnal. Conflictul se repară de un om, iar când se repară, coada pleacă
+    singură.
     """
     pass
 
@@ -150,6 +175,7 @@ def handle_response(response: Response) -> Dict[str, Any]:
         401 -> AuthenticationError     — identitate nerecunoscută, recuperabilă
         403 -> IdentityMismatchError   — identitate acceptată, acțiune refuzată
         404 -> AgentNotRegisteredError — agent pierdut de server, recuperabil
+        409 -> IdentityConflictError   — numele e al altei mașini
         alt 4xx (fără 408/429) -> FatalTransportError — mesajul e stricat
         restul -> TransportError       — temporar (rețea, 5xx, throttling)
     """
@@ -169,6 +195,11 @@ def handle_response(response: Response) -> Dict[str, Any]:
         if response.status_code == 403:
             raise IdentityMismatchError(
                 f"Agent key does not authorize this agent_id (HTTP 403): {error_detail}"
+            ) from error
+
+        if response.status_code == 409:
+            raise IdentityConflictError(
+                f"agent_id already claimed by another machine (HTTP 409): {error_detail}"
             ) from error
 
         if response.status_code == 404:

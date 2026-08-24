@@ -58,8 +58,16 @@ class AuthFailureAlarm:
         repeat_alarm_seconds: float = DEFAULT_REPEAT_ALARM_SECONDS,
         logger: Optional[logging.Logger] = None,
         clock: Callable[[], float] = time.monotonic,
+        subject: str = "authentication",
+        remedy: str = "Check the agent key, the server key store and the clock.",
     ):
         self.channel = channel
+        # subject si remedy exista pentru ca aceeasi escaladare pe timp scurs
+        # se aplica si altor refuzuri decat cele de autentificare — un conflict
+        # de identitate, de pilda. Textul implicit reproduce exact mesajele de
+        # dinaintea parametrilor, deci canalele existente raman neschimbate.
+        self.subject = subject
+        self.remedy = remedy
         self.first_alarm_seconds = float(first_alarm_seconds)
         self.repeat_alarm_seconds = float(repeat_alarm_seconds)
         self.logger = logger or logging.getLogger(__name__)
@@ -103,9 +111,10 @@ class AuthFailureAlarm:
 
         self.logger.log(
             attempt_level,
-            "%s: authentication refused by server (%s). Failing for %.0fs; "
+            "%s: %s refused by server (%s). Failing for %.0fs; "
             "nothing is being discarded.",
             self.channel,
+            self.subject,
             message,
             elapsed,
         )
@@ -124,12 +133,13 @@ class AuthFailureAlarm:
                 self.logger.debug("Alarm detail provider failed.", exc_info=True)
 
         self.logger.critical(
-            "%s: authentication has been failing for %.0f minutes (alarm #%d). "
-            "This endpoint is effectively unmonitored server-side. Check the agent "
-            "key, the server key store and the clock.%s",
+            "%s: %s has been failing for %.0f minutes (alarm #%d). This endpoint "
+            "is effectively unmonitored server-side. %s%s",
             self.channel,
+            self.subject,
             elapsed / 60.0,
             self._alarms_raised,
+            self.remedy,
             detail,
         )
 
@@ -151,7 +161,8 @@ class AuthFailureAlarm:
         level = logging.CRITICAL if raised else logging.INFO
         self.logger.log(
             level,
-            "%s: authentication recovered after %.0fs.",
+            "%s: %s recovered after %.0fs.",
             self.channel,
+            self.subject,
             elapsed,
         )

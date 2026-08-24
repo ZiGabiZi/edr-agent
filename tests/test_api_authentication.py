@@ -45,6 +45,7 @@ from services.transport import (
     AgentNotRegisteredError,
     AuthenticationError,
     FatalTransportError,
+    IdentityConflictError,
     IdentityMismatchError,
     TransportError,
     handle_response,
@@ -139,6 +140,23 @@ class ErrorClassificationTests(unittest.TestCase):
     def test_403_maps_to_identity_mismatch(self) -> None:
         with self.assertRaises(IdentityMismatchError):
             handle_response(_response(403))
+
+    def test_409_is_not_a_fatal_error(self) -> None:
+        """
+        Un conflict de nume nu are voie să oprească agentul.
+
+        Clasificat fatal, 409 făcea register_agent_with_retry să întoarcă False,
+        iar run_agent sărea peste bucla de heartbeat direct în finally — oprind
+        file monitor-ul, dispatcher-ul și spool-ul. O mașină perfect sănătoasă
+        dispărea complet din consolă din cauza unei coliziuni de nume, iar
+        tăcerea totală nu se distinge de un endpoint oprit sau compromis.
+        """
+        self.assertFalse(issubclass(IdentityConflictError, FatalTransportError))
+        self.assertTrue(issubclass(IdentityConflictError, TransportError))
+
+    def test_409_maps_to_identity_conflict(self) -> None:
+        with self.assertRaises(IdentityConflictError):
+            handle_response(_response(409))
 
     def test_404_still_maps_to_agent_not_registered(self) -> None:
         with self.assertRaises(AgentNotRegisteredError):
@@ -697,6 +715,57 @@ def _heartbeat_config() -> Dict[str, Any]:
         "auth_alarm_first_seconds": 300.0,
         "auth_alarm_repeat_seconds": 1800.0,
     }
+
+
+class RegistrationConflictTests(unittest.TestCase):
+    """Un conflict de identitate nu are voie să oprească procesul agent."""
+
+    def _config(self) -> Dict[str, Any]:
+        return {
+            "agent_id": "endpoint-01",
+            "agent_version": "0.1.0",
+            "auth_alarm_first_seconds": 300.0,
+            "auth_alarm_repeat_seconds": 1800.0,
+        }
+
+    def test_a_name_conflict_keeps_the_agent_retrying(self) -> None:
+        attempts = []
+
+        def conflict(server_url, payload, agent_key=None, enrollment_secret=None):
+            attempts.append(payload["agent_id"])
+            raise IdentityConflictError("HTTP 409")
+
+        stop_event = FakeStopEvent(trip_after_waits=3)
+
+        with patch.object(agent, "check_server_health", lambda url: {"status": "ok"}), \
+             patch.object(agent, "register_agent", conflict):
+            registered = agent.register_agent_with_retry(
+                self._config(), "http://server", {}, stop_event
+            )
+
+        self.assertEqual(len(attempts), 3, "bucla trebuie să reîncerce, nu să abandoneze")
+        self.assertFalse(registered, "ieșirea e oprirea cerută, nu abandonul la 409")
+
+    def test_a_rejected_registration_payload_still_aborts(self) -> None:
+        """
+        Contra-testul: 422 la înregistrare rămâne motiv de abandon. Acolo cauza e
+        un payload pe care agentul îl construiește greșit — un bug al nostru, nu
+        o stare a parcului — și merită oprire zgomotoasă, nu retry la nesfârșit.
+        """
+        attempts = []
+
+        def rejected(server_url, payload, agent_key=None, enrollment_secret=None):
+            attempts.append(payload["agent_id"])
+            raise FatalTransportError("HTTP 422")
+
+        with patch.object(agent, "check_server_health", lambda url: {"status": "ok"}), \
+             patch.object(agent, "register_agent", rejected):
+            registered = agent.register_agent_with_retry(
+                self._config(), "http://server", {}, FakeStopEvent(trip_after_waits=5)
+            )
+
+        self.assertEqual(len(attempts), 1)
+        self.assertFalse(registered)
 
 
 class HeartbeatLoopAuthTests(unittest.TestCase):

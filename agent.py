@@ -25,6 +25,7 @@ from services.transport import (
     AgentNotRegisteredError,
     AuthenticationError,
     FatalTransportError,
+    IdentityConflictError,
     IdentityMismatchError,
     TransportError,
     check_server_health,
@@ -322,7 +323,12 @@ def _auth_alarm_settings(config: Dict[str, Any]) -> AuthAlarmSettings:
     )
 
 
-def _build_auth_alarm(channel: str, config: Dict[str, Any]) -> AuthFailureAlarm:
+def _build_auth_alarm(
+    channel: str,
+    config: Dict[str, Any],
+    subject: str = "authentication",
+    remedy: str = "Check the agent key, the server key store and the clock.",
+) -> AuthFailureAlarm:
     """
     Construiește alarma unui canal, cu pragurile din config.
 
@@ -338,6 +344,8 @@ def _build_auth_alarm(channel: str, config: Dict[str, Any]) -> AuthFailureAlarm:
         first_alarm_seconds=settings.first_alarm_seconds,
         repeat_alarm_seconds=settings.repeat_alarm_seconds,
         logger=logger,
+        subject=subject,
+        remedy=remedy,
     )
 
 
@@ -474,6 +482,16 @@ def register_agent_with_retry(
     )
 
     auth_alarm = _build_auth_alarm("Registration", config)
+    conflict_alarm = _build_auth_alarm(
+        "Registration",
+        config,
+        subject="identity registration",
+        remedy=(
+            "The agent_id is claimed by another machine. Free it on the server, "
+            "or give this endpoint a different one by deleting its identity file "
+            "or setting agent_id in config.json."
+        ),
+    )
 
     while not stop_event.is_set():
         try:
@@ -521,6 +539,19 @@ def register_agent_with_retry(
                     else logging.WARNING
                 ),
             )
+            stop_event.wait(timeout=backoff.record_failure())
+
+        except IdentityConflictError as error:
+            # Un conflict de NUME nu are voie sa opreasca colectarea locala.
+            # Vezi IdentityConflictError: clasificat fatal, facea ca aceasta
+            # functie sa intoarca False, iar run_agent sa sara peste heartbeat
+            # direct in finally, oprind monitorul si spool-ul. Masina disparea
+            # complet din consola, ceea ce nu se distinge de un endpoint oprit
+            # sau compromis.
+            #
+            # ERROR de la prima aparitie, ca la 403: nu se repara singur, dar
+            # se repara de un om, iar pana atunci evenimentele se aduna local.
+            conflict_alarm.record_failure(str(error), attempt_level=logging.ERROR)
             stop_event.wait(timeout=backoff.record_failure())
 
         except FatalTransportError as error:
