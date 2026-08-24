@@ -479,6 +479,7 @@ def register_agent_with_retry(
         base_delay=_STARTUP_BASE_DELAY_SECONDS,
         max_delay=_STARTUP_MAX_DELAY_SECONDS,
         logger=logger,
+        channel="Registration",
     )
 
     auth_alarm = _build_auth_alarm("Registration", config)
@@ -674,6 +675,7 @@ def heartbeat_loop(
         agent_id=config["agent_id"],
         base_delay=float(current_interval),
         logger=logger,
+        channel="Heartbeat",
     )
 
     auth_alarm = _build_auth_alarm("Heartbeat", config)

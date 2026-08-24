@@ -161,7 +161,14 @@ class BackoffState:
 
 class HeartbeatBackoffController:
     """
-    Controlează logica de retry cu backoff exponențial pentru heartbeat-urile agentului EDR.
+    Controlează logica de retry cu backoff exponențial pentru un canal al agentului.
+
+    Numele clasei e istoric: a fost scrisă pentru heartbeat, dar e folosită de
+    trei bucle independente — înregistrarea, heartbeat-ul și livrarea de
+    evenimente. De aceea fiecare instanță primește numele canalului ei, iar
+    mesajele îl poartă: un jurnal care spune „Heartbeat failed" în timp ce
+    eșuează livrarea de evenimente trimite pe cine îl citește în locul greșit,
+    și a făcut-o deja de două ori într-o sesiune de testare manuală.
 
     Responsabilități:
       - Urmărirea stării eșecurilor consecutive
@@ -183,8 +190,13 @@ class HeartbeatBackoffController:
         multiplier: float = DEFAULT_MULTIPLIER,
         jitter_ratio: float = DEFAULT_JITTER_RATIO,
         logger: Optional[logging.Logger] = None,
+        channel: str = "Heartbeat",
     ):
         self.agent_id = agent_id
+        # Numele canalului apare in fiecare mesaj. Implicitul pastreaza textul
+        # dinaintea parametrului pentru bucla de heartbeat, deci singurele linii
+        # care se schimba sunt exact cele care minteau.
+        self.channel = channel
         self.base_delay = base_delay
         self.max_delay = max_delay
         self.multiplier = multiplier
@@ -206,8 +218,9 @@ class HeartbeatBackoffController:
         """
         if self._state.consecutive_failures > 0:
             self.logger.info(
-                "Server connection restored after %d consecutive failure(s). "
-                "Resuming normal heartbeat interval.",
+                "%s recovered after %d consecutive failure(s); resuming normal "
+                "cadence.",
+                self.channel,
                 self._state.consecutive_failures,
             )
 
@@ -240,7 +253,8 @@ class HeartbeatBackoffController:
         )
 
         self.logger.warning(
-            "Heartbeat failed (consecutive: %d | total: %d | next retry in: %.1fs).",
+            "%s failed (consecutive: %d | total: %d | next retry in: %.1fs).",
+            self.channel,
             self._state.consecutive_failures,
             self._state.total_failures,
             delay,

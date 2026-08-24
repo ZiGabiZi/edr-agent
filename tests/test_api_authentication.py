@@ -35,6 +35,7 @@ from requests import Response
 import agent
 from services import transport
 from services.agent_credentials import AgentCredentials
+from services.backoff import HeartbeatBackoffController
 from services.auth_alarm import (
     DEFAULT_FIRST_ALARM_SECONDS,
     DEFAULT_REPEAT_ALARM_SECONDS,
@@ -715,6 +716,108 @@ def _heartbeat_config() -> Dict[str, Any]:
         "auth_alarm_first_seconds": 300.0,
         "auth_alarm_repeat_seconds": 1800.0,
     }
+
+
+class BackoffChannelNamingTests(unittest.TestCase):
+    """
+    Fiecare buclă își spune pe nume în jurnal.
+
+    HeartbeatBackoffController e folosit de trei bucle independente, dar loga
+    „Heartbeat failed" din toate. În testarea manuală, linii de eșec de heartbeat
+    au apărut înainte ca bucla de heartbeat să fi pornit măcar, chiar lângă
+    eșecul real de pe alt canal. Într-o depanare, e genul de linie care trimite
+    în locul greșit — și a făcut-o de două ori într-o singură sesiune.
+    """
+
+    def _controller(self, **kwargs: Any) -> HeartbeatBackoffController:
+        logger = logging.getLogger("test-backoff")
+        logger.addHandler(logging.NullHandler())
+        return HeartbeatBackoffController(
+            agent_id="endpoint-01", base_delay=1.0, logger=logger, **kwargs
+        )
+
+    def test_the_channel_name_appears_in_the_failure_line(self) -> None:
+        controller = self._controller(channel="Event delivery")
+
+        with self.assertLogs("test-backoff", level="WARNING") as captured:
+            controller.record_failure()
+
+        self.assertIn("Event delivery failed", captured.output[0])
+        self.assertNotIn("Heartbeat", captured.output[0])
+
+    def test_the_channel_name_appears_in_the_recovery_line(self) -> None:
+        controller = self._controller(channel="Registration")
+        controller.record_failure()
+
+        with self.assertLogs("test-backoff", level="INFO") as captured:
+            controller.record_success()
+
+        self.assertIn("Registration recovered", captured.output[0])
+
+    def test_heartbeat_stays_the_default_so_its_lines_are_unchanged(self) -> None:
+        """
+        Implicitul păstrează textul de dinaintea parametrului. Singurele linii
+        care se schimbă sunt exact cele care minteau.
+        """
+        controller = self._controller()
+
+        with self.assertLogs("test-backoff", level="WARNING") as captured:
+            controller.record_failure()
+
+        self.assertIn("Heartbeat failed (consecutive: 1", captured.output[0])
+
+    def _recorded_channels(self):
+        """Interceptează numele canalului cu care fiecare buclă își face controllerul."""
+        channels: List[Optional[str]] = []
+        real = HeartbeatBackoffController
+
+        def recording(*args: Any, **kwargs: Any) -> HeartbeatBackoffController:
+            channels.append(kwargs.get("channel"))
+            return real(*args, **kwargs)
+
+        return channels, recording
+
+    def test_the_registration_loop_names_its_channel(self) -> None:
+        channels, recording = self._recorded_channels()
+
+        with patch.object(agent, "HeartbeatBackoffController", recording), \
+             patch.object(agent, "check_server_health", lambda url: {"status": "ok"}), \
+             patch.object(agent, "register_agent", lambda *a, **k: {}):
+            agent.register_agent_with_retry(
+                {"agent_id": "endpoint-01", "agent_version": "0.1.0"},
+                "http://server",
+                {},
+                FakeStopEvent(),
+            )
+
+        self.assertEqual(channels, ["Registration"])
+
+    def test_the_heartbeat_loop_names_its_channel(self) -> None:
+        channels, recording = self._recorded_channels()
+
+        def stop_immediately(*args: Any, **kwargs: Any):
+            raise TransportError("stop here")
+
+        with patch.object(agent, "HeartbeatBackoffController", recording), \
+             patch.object(agent, "send_heartbeat", stop_immediately):
+            agent.heartbeat_loop(
+                config=_heartbeat_config(),
+                server_url="http://server",
+                system_info={},
+                heartbeat_interval_seconds=10,
+                stop_event=FakeStopEvent(trip_after_waits=1),
+            )
+
+        self.assertEqual(channels, ["Heartbeat"])
+
+    def test_the_dispatcher_names_its_channel(self) -> None:
+        """
+        Garda de traseu: un canal nou adăugat fără nume ar redeveni „Heartbeat"
+        tăcut, iar jurnalul ar minți din nou fără ca nimic să pice.
+        """
+        dispatcher = _make_dispatcher(FakeSpool([]), FakeStopEvent())
+
+        self.assertEqual(dispatcher._backoff.channel, "Event delivery")
 
 
 class RegistrationConflictTests(unittest.TestCase):

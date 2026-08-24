@@ -122,6 +122,7 @@ class EventDispatcher(threading.Thread):
             base_delay=_DISPATCH_BASE_DELAY_SECONDS,
             max_delay=_DISPATCH_MAX_DELAY_SECONDS,
             logger=self.logger,
+            channel="Event delivery",
         )
         self._auth_alarm = AuthFailureAlarm(
             channel="Event delivery",
