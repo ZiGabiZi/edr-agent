@@ -83,13 +83,22 @@ def build_file_event_payload(
     event_time = occurred_at or current_time
     normalized_path = normalize_file_path(file_path)
 
-    descriptions = {
-        "file_created": "New file detected in monitored directory",
-        "file_modified": "File modified in monitored directory",
-    }
-
-    description = descriptions.get(event_type, "File system event detected")
-
+    # description NU se emite pentru evenimentele de fișier, deliberat.
+    #
+    # Era un tabel de căutare pe event_type plus timestamp-ul — adică o
+    # reformulare în engleză a exact ceea ce spun deja `event_type` și
+    # `occurred_at`. Informație nouă: zero.
+    #
+    # Nu e o economie cosmetică. Măsurătoarea liniei de bază T0 a arătat că
+    # acel câmp era CEL MAI SCUMP din payload: 93 din 568 de octeți, adică
+    # 16,4%, mai mult decât amprenta SHA-256 însăși. Iar canalul de evenimente
+    # circulă la FIECARE fișier atins, nu doar la cele escaladate, deci costul
+    # se plătea de sute de ori pe minut sub o rafală.
+    #
+    # Câmpul rămâne opțional în contract (v4) și rămâne folosit acolo unde chiar
+    # poartă informație: evenimentele de ciclu de viață ale agentului, și
+    # narațiunea de repornire pe care o compune serverul. Distincția e între un
+    # text AUTORAT și unul DERIVAT — al doilea nu are ce căuta pe fir.
     payload: Dict[str, Any] = {
         "client_event_id": str(uuid4()),
         "agent_id": agent_id,
@@ -97,7 +106,6 @@ def build_file_event_payload(
         "event_type": event_type,
         "occurred_at": event_time,
         "file_path": normalized_path,
-        "description": f"{description} at {event_time}",
     }
 
     if sha256 is not None:

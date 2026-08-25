@@ -300,7 +300,25 @@ class BuildFileEventPayloadTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["occurred_at"], "2026-01-01T00:00:01+00:00")
-        self.assertIn("2026-01-01T00:00:01+00:00", payload["description"])
+
+    def test_a_file_event_carries_no_derived_description(self):
+        """
+        Câmpul era un tabel de căutare pe event_type plus timestamp — adică o
+        reformulare a ceea ce spun deja alte două câmpuri. Măsurătoarea liniei
+        de bază T0 l-a arătat drept cel mai scump din payload: 93 din 568 de
+        octeți, mai mult decât amprenta SHA-256, plătiți la FIECARE fișier atins.
+
+        Garda există pentru că un câmp derivat se strecoară ușor înapoi: e util
+        la depanare, arată inofensiv, și nimic nu pică dacă reapare.
+        """
+        payload = build_file_event_payload(
+            agent_id="a1",
+            event_type="file_created",
+            file_path="/tmp/a.exe",
+            agent_instance_id="i1",
+        )
+
+        self.assertNotIn("description", payload)
 
     def test_settle_wait_travels_under_measurements(self):
         payload = build_file_event_payload(
