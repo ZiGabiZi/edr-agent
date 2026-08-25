@@ -285,13 +285,43 @@ class FileHasher:
         releaser: dacă firul moare, coada crește în tăcere și nimeni nu
         raportează nimic despre fișierele din ea.
         """
-        while not self._stop_event.wait(self.poll_seconds):
+        while not self._stop_event.is_set():
             try:
                 self.process_once()
             except Exception:
                 self.logger.exception(
                     "Hash pass failed; the loop continues."
                 )
+                # Pauză și după excepție: fără ea, o eroare care se repetă ar
+                # transforma bucla în busy-spin și ar umple jurnalul cu aceeași
+                # linie de mii de ori pe secundă.
+                if self._stop_event.wait(self.poll_seconds):
+                    break
+                continue
+
+            # Pauza e pentru INACTIVITATE, nu pentru cadență.
+            #
+            # Înainte, bucla aștepta poll_seconds între TOATE trecerile, iar o
+            # trecere procesează deliberat un singur fișier. Rezultatul era un
+            # plafon dur de 1/poll_seconds fișiere pe secundă — 10 pe secundă la
+            # valoarea implicită — indiferent dacă fișierul avea 7 octeți sau
+            # 200 MB. Măsurat pe o rafală de 10.000 de fișiere mici: 9,1
+            # fișiere/s, în timp ce watchdog livra 1577 pe secundă fără să piardă
+            # niciunul. Backlog-ul creștea până când bugetul de oprire îl arunca.
+            #
+            # „Un fișier per trecere" rămâne, pentru că motivul lui e real:
+            # reîncercările și degradările sunt ieftine și nu trebuie să aștepte
+            # după un fișier mare. Ce dispare e pauza dintre treceri atunci când
+            # mai există treabă — legătura dintre cele două nu era necesară.
+            #
+            # Asimetria care a scos problema la iveală: drain_for_shutdown()
+            # buclează fără nicio pauză, deci oprirea agentului procesa de
+            # douăsprezece ori mai repede decât funcționarea lui normală.
+            if self.queue_depth() > 0:
+                continue
+
+            if self._stop_event.wait(self.poll_seconds):
+                break
 
         try:
             self.drain_for_shutdown()

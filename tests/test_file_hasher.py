@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from typing import List, Optional
 
 from services.file_hasher import FileHasher
@@ -749,3 +750,99 @@ class WorkerThreadTests(TempFileTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class _CountingStopEvent(threading.Event):
+    """
+    Semnal de oprire care numără așteptările și se declanșează la comandă.
+
+    Există ca proprietatea „nu aștepta când mai ai treabă" să fie verificabilă
+    fără ceas real: numărăm apelurile de wait(), nu secundele scurse.
+
+    Subclasă de threading.Event, nu duck-type: FileHasher._stop_event e un Event
+    real, iar o dublură care doar seamănă ar fi trecut la rulare dar ar fi fost
+    o eroare de tip la fiecare atribuire. Moștenirea face substituirea corectă
+    și în ochii verificatorului, nu doar ai interpretorului.
+    """
+
+    def __init__(self, stop_when):
+        super().__init__()
+        self.waits: List[Optional[float]] = []
+        self._stop_when = stop_when
+
+    def is_set(self) -> bool:
+        return self._stop_when()
+
+    def wait(self, timeout=None) -> bool:
+        self.waits.append(timeout)
+        return self._stop_when()
+
+
+class HasherThroughputTests(unittest.TestCase):
+    """
+    Bucla nu are voie să se odihnească peste o coadă plină.
+
+    Regresia pe care o păzesc aceste teste era invizibilă în orice test
+    funcțional: fiecare fișier ajungea corect în coadă, doar că zece pe secundă.
+    Măsurat pe o rafală reală de 10.000 de fișiere mici, watchdog livra 1577 pe
+    secundă fără să piardă niciunul, iar lanțul nostru scotea 9,1 — restul se
+    aduna până când bugetul de oprire îl arunca fără hash. Vezi issue #13.
+    """
+
+    def test_the_loop_does_not_wait_while_the_queue_has_work(self) -> None:
+        callback = FlakyCallback()
+        _, hasher = _make_hasher(callback, poll_seconds=0.1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            for index in range(10):
+                path = Path(directory) / f"f{index}.bin"
+                path.write_bytes(f"continut-{index}".encode())
+                hasher.submit(_pending(str(path)))
+
+            # Ne oprim exact când coada s-a golit, deci bucla rulează atâtea
+            # treceri câte intrări sunt, și nici una în plus.
+            stop_event = _CountingStopEvent(lambda: hasher.queue_depth() == 0)
+            hasher._stop_event = stop_event
+            hasher.run()
+
+        self.assertEqual(len(callback.calls), 10, "toate intrările trebuie procesate")
+
+        # Cel mult UNA: cea de după golirea cozii, adică intrarea legitimă pe
+        # calea de inactivitate. Orice pauză în plus înseamnă că bucla a
+        # așteptat între intrări — exact plafonul de 1/poll_seconds fișiere pe
+        # secundă pe care reparația l-a eliminat. Cu implementarea veche, aici
+        # ar fi apărut zece.
+        self.assertLessEqual(
+            len(stop_event.waits),
+            1,
+            f"bucla a așteptat de {len(stop_event.waits)} ori pentru zece "
+            f"intrări; pauza a revenit între treceri",
+        )
+
+    def test_the_loop_still_rests_when_there_is_nothing_to_do(self) -> None:
+        """
+        Contra-proba. Fără pauza pe inactivitate, firul ar consuma un nucleu
+        întreg cât timp agentul nu are nimic de făcut — adică aproape tot timpul.
+        """
+        callback = FlakyCallback()
+        _, hasher = _make_hasher(callback, poll_seconds=0.1)
+
+        passes = {"count": 0}
+
+        def stop_after_two_waits() -> bool:
+            passes["count"] += 1
+            return passes["count"] > 4
+
+        stop_event = _CountingStopEvent(stop_after_two_waits)
+        hasher._stop_event = stop_event
+        hasher.run()
+
+        self.assertGreater(
+            len(stop_event.waits),
+            0,
+            "coada goală trebuie să producă o pauză, nu busy-spin",
+        )
+        self.assertEqual(
+            set(stop_event.waits),
+            {0.1},
+            "pauza trebuie să fie exact poll_seconds",
+        )
