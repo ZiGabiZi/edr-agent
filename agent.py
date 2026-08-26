@@ -388,8 +388,18 @@ def _adopt_issued_credentials(
     schimba credențialele întregului parc din reflex, iar fereastra în care o
     scriere pe disc eșuată lasă agentul fără cheie s-ar deschide la fel de des.
 
-    Consumarea secretului de înrolare se face DUPĂ adoptarea cheii și numai pe
-    calea asta: e definiția lui „prima folosire reușită".
+    Consumarea secretului de înrolare se face DUPĂ adoptarea cheii, numai pe
+    calea asta și numai dacă cheia a ajuns efectiv pe disc: „prima folosire
+    reușită" înseamnă o cheie care supraviețuiește repornirii, nu una ținută
+    în memoria procesului curent.
+
+    Distincția e singura care ține agentul recuperabil. O cheie doar în memorie
+    plus un secret șters = la următoarea pornire nu mai există nicio
+    credențială, agentul refuză orice trimitere și îngrașă spool-ul local până
+    când vine cineva să pună un fișier cu mâna. Secretul păstrat rămâne, ce-i
+    drept, o capabilitate permanentă de a cere o cheie, dar e prețul corect pe
+    o mașină care tocmai a arătat că nu poate scrie în directorul de
+    credențiale.
     """
     if credentials is None:
         return
@@ -399,8 +409,16 @@ def _adopt_issued_credentials(
     if not isinstance(issued_key, str) or not issued_key.strip():
         return
 
-    credentials.adopt_agent_key(issued_key.strip())
-    credentials.consume_enrollment_secret()
+    if credentials.adopt_agent_key(issued_key.strip()):
+        credentials.consume_enrollment_secret()
+        return
+
+    logger.error(
+        "The enrollment secret was kept on disk because the issued key could "
+        "not be persisted. It remains a standing capability to request a key, "
+        "but it is also the only way this endpoint can enroll again after a "
+        "restart. Remove it by hand once the key file is writable."
+    )
 
 
 def register_agent_with_retry(

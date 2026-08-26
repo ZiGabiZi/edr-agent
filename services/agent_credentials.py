@@ -254,7 +254,7 @@ class AgentCredentials:
 
     # -- scriere -----------------------------------------------------------
 
-    def adopt_agent_key(self, agent_key: str) -> None:
+    def adopt_agent_key(self, agent_key: str) -> bool:
         """
         Preia cheia emisă de server: o ține în memorie și o scrie pe disc.
 
@@ -262,6 +262,17 @@ class AgentCredentials:
         agentul poate funcționa complet pe durata acestei rulări și doar va
         trebui să se reînroleze la următoarea pornire. Invers — disc întâi și
         abandon la eroare — ar transforma un disc plin într-un agent mut.
+
+        Reînrolarea aceea nu e însă gratuită: are nevoie de secretul de
+        înrolare, pe care apelantul îl șterge imediat după. De aceea eșecul se
+        RAPORTEAZĂ, nu doar se loghează. Cât timp funcția returna None pe
+        ambele căi, apelantul arunca singura cale de recuperare exact în cazul
+        în care ea devenea necesară, iar promisiunea din logul de mai jos era
+        falsă: agentul repornea fără cheie și fără secret, adică mut.
+
+        Returns:
+            True dacă cheia a ajuns pe disc și supraviețuiește repornirii.
+            False dacă trăiește doar în memoria acestui proces.
         """
         with self._lock:
             self._agent_key = agent_key
@@ -269,12 +280,14 @@ class AgentCredentials:
         try:
             self._write_secret_file(self.agent_key_path, agent_key)
             self.logger.info("Agent API key stored at %s.", self.agent_key_path)
+            return True
         except AgentCredentialsError as error:
             self.logger.error(
                 "%s The key is held in memory for this run only; the agent will "
                 "need to enroll again after a restart.",
                 error,
             )
+            return False
 
     def consume_enrollment_secret(self) -> None:
         """

@@ -34,7 +34,7 @@ from requests import Response
 
 import agent
 from services import transport
-from services.agent_credentials import AgentCredentials
+from services.agent_credentials import AgentCredentials, AgentCredentialsError
 from services.backoff import HeartbeatBackoffController
 from services.auth_alarm import (
     DEFAULT_FIRST_ALARM_SECONDS,
@@ -702,6 +702,61 @@ class AgentCredentialsTests(unittest.TestCase):
         self.assertEqual(credentials.agent_key, "issued-key")
         self.assertIsNone(credentials.enrollment_secret)
         self.assertFalse(self.secret_path.exists())
+
+    def test_adoption_reports_when_the_key_never_reached_the_disk(self) -> None:
+        """
+        Semnalul de care depinde decizia de mai jos.
+
+        Cât timp adopt_agent_key() returna None și pe calea reușită, și pe cea
+        eșuată, apelantul n-avea cum să afle că cheia trăiește doar în memorie.
+        """
+        credentials = self._credentials()
+
+        with patch.object(
+            credentials,
+            "_write_secret_file",
+            side_effect=AgentCredentialsError("disc plin"),
+        ):
+            with self.assertLogs("test-credentials", level="ERROR"):
+                persisted = credentials.adopt_agent_key("issued-key")
+
+        self.assertFalse(persisted)
+        self.assertEqual(credentials.agent_key, "issued-key")
+        self.assertFalse(self.key_path.exists())
+
+    def test_a_key_that_could_not_be_written_keeps_the_secret(self) -> None:
+        """
+        Criteriul din #18: agentul trebuie să rămână recuperabil.
+
+        Dacă scrierea cheii eșuează, cheia dispare la oprirea procesului. Un
+        secret consumat oricum ar lăsa următoarea pornire fără nicio
+        credențială — agentul refuză orice trimitere, umple spool-ul local și
+        nu mai iese din starea asta decât dacă vine cineva să pună un fișier cu
+        mâna. Secretul păstrat înseamnă că repornirea se reînrolează singură,
+        exact ce promitea logul.
+        """
+        self.secret_path.write_text("shared-secret\n", encoding="utf-8")
+        credentials = self._credentials()
+        credentials.load()
+
+        with patch.object(
+            credentials,
+            "_write_secret_file",
+            side_effect=AgentCredentialsError("disc plin"),
+        ):
+            with self.assertLogs(agent.logger, level="ERROR"):
+                agent._adopt_issued_credentials(
+                    {"agent_key": "issued-key"}, credentials
+                )
+
+        self.assertEqual(credentials.agent_key, "issued-key")
+        self.assertEqual(credentials.enrollment_secret, "shared-secret")
+        self.assertTrue(self.secret_path.exists())
+
+        reloaded = self._credentials()
+        reloaded.load()
+        self.assertIsNone(reloaded.agent_key)
+        self.assertEqual(reloaded.enrollment_secret, "shared-secret")
 
 
 # ---------------------------------------------------------------------------
