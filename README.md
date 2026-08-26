@@ -118,7 +118,8 @@ e monoton, ca o corecție NTP să nu declanșeze sau să amâne o alarmă.
 
 | Fișier | Conținut | Se copiază între mașini? |
 |---|---|---|
-| `config.json` | configurare de operator | **da** — e fișierul de desfășurare |
+| `config.example.json` | șablonul versionat, fără identitate | **da** — e artefactul livrat |
+| `config.json` | configurarea mașinii, copiată din șablon | **nu** — diverge imediat |
 | `enrollment_secret` | secret comun de înrolare | da, la instalare; se șterge după prima folosire |
 | `agent_key` | cheia proprie, emisă de server | **nu** — stare locală, permisiuni restrânse |
 | `agent_id` | identitatea, derivată o dată și înghețată | **nu** |
@@ -141,13 +142,27 @@ Detalii despre credențiale: [contracts/AUTH.md](contracts/AUTH.md).
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
 ```
 
-Pune secretul de înrolare în `enrollment_secret`, ajustează `config.json`, apoi:
+Configurarea nu vine gata din repo: `config.json` e ignorat de git, pentru că e
+fișierul unei mașini, nu al proiectului. Se naște din șablon:
+
+```bash
+copy config.example.json config.json
+```
+
+Editează `server_url` — și `monitored_directories`, dacă nu monitorizezi calea
+implicită. `agent_id` lipsește din șablon **deliberat**: absent, e derivat din
+hostname plus amprenta mașinii și înghețat local, ceea ce face ca aceeași imagine
+de instalare să poată fi desfășurată pe oricâte endpoint-uri. Scris fix în șablon,
+a doua mașină ar revendica numele primei și ar fi respinsă cu `409`. Pune-l doar
+dacă vrei un nume impus pe o mașină anume.
+
+Pune secretul de înrolare în `enrollment_secret`, apoi:
 
 ```bash
 .venv\Scripts\python.exe agent.py
 ```
 
-Testele — **194**, fără rețea și fără server:
+Testele — **198**, fără rețea și fără server:
 
 ```bash
 .venv\Scripts\python.exe -m unittest discover -s tests

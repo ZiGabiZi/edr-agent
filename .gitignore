@@ -6,6 +6,12 @@ __pycache__
 .claude/
 *.db
 event_spool.db*
+# Configurarea efectiva a masinii: se naste din config.example.json si diverge
+# imediat (server_url, directoare monitorizate, eventual un agent_id impus de
+# operator). Versionata, ar fi aparut permanent modificata in git status si ar
+# fi carat valorile unei masini pe toate celelalte.
+/config.json
+
 # Secrete de autentificare - nu au ce cauta in istoric sau in backup-uri partajate
 agent_key
 agent_key.tmp

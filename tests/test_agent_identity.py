@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
+from services.agent_credentials import DEFAULT_AGENT_KEY_PATH
 from services.agent_identity import (
     DEFAULT_AGENT_ID_PATH,
     derive_agent_id,
@@ -251,10 +252,14 @@ class PrecedenceTests(unittest.TestCase):
         """
         Nu în config.json, deliberat: acela e fișierul copiat între mașini, deci
         scrierea acolo ar reproduce exact bug-ul de la care s-a plecat.
+
+        Ancora e agent_key, nu un nume de director: numele checkout-ului e o
+        proprietate a mașinii pe care s-a clonat repo-ul (worktree, arhivă
+        dezarhivată, alt director în CI), nu a codului. Ce trebuie să nu se
+        schimbe tăcut e vecinătatea celor două fișiere.
         """
         self.assertEqual(DEFAULT_AGENT_ID_PATH.name, "agent_id")
-        self.assertEqual(DEFAULT_AGENT_ID_PATH.parent.name, "edr-agent")
-
+        self.assertEqual(DEFAULT_AGENT_ID_PATH.parent, DEFAULT_AGENT_KEY_PATH.parent)
 
 if __name__ == "__main__":
     unittest.main()

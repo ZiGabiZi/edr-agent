@@ -262,6 +262,17 @@ def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     config_path = Path(config_path) if config_path is not None else CONFIG_PATH
     
     if not config_path.exists():
+        # Un clone proaspat nu are config.json: e ignorat deliberat, pentru ca
+        # e fisierul masinii, nu al proiectului. Mesajul spune pasul urmator,
+        # altfel eroarea arata ca un fisier pierdut, nu ca un pas de instalare
+        # nefacut.
+        example_path = config_path.with_name("config.example.json")
+        if example_path.exists():
+            raise ConfigError(
+                f"Config file not found: {config_path}. Copy "
+                f"{example_path.name} to {config_path.name} and set server_url "
+                f"for this deployment."
+            )
         raise ConfigError(f"Config file not found: {config_path}")
 
     try:
