@@ -54,6 +54,19 @@ TRANSPORT_SUPPLIED_FIELDS = {
     "heartbeat_request": frozenset({"agent_id"}),
 }
 
+# Blocurile imbricate și modelul din contract pe care fiecare îl țintește.
+#
+# Verificările generice de mai jos compară `set(payload)`, adică doar cheile de
+# la primul nivel. Un bloc imbricat trece de ele oricum ar arăta pe dinăuntru:
+# `measurements: {"settle_wat_ms": 12}` e un payload cu chei de prim nivel
+# perfect valide, iar tipografia dinăuntru ajunge la server, unde Pydantic o
+# aruncă și răspunde 200 OK. Exact bug-ul pe care fișierul ăsta există să-l
+# prindă, doar cu un nivel mai jos.
+NESTED_CONTRACT_MODELS = {
+    "measurements": "event_measurements",
+    "disclosure": "event_disclosure",
+}
+
 
 def _make_config() -> dict:
     return {
@@ -117,6 +130,22 @@ def _all_builder_cases() -> list:
             "event_create_request",
         ),
         (
+            # Treaptă escaladată: singurul caz în care content_bytes e nenul.
+            # Sistemul nu poate ajunge încă aici — T2 și T3 nu există — dar
+            # contractul le declară deja, iar un câmp declarat și niciodată
+            # exercitat e un câmp a cărui formă n-a fost verificată de nimeni.
+            "build_file_event_payload[escaladat]",
+            build_file_event_payload(
+                "agent-test",
+                "file_created",
+                "C:/tmp/proba.txt",
+                config["agent_instance_id"],
+                tier="T3",
+                content_bytes=143_000,
+            ),
+            "event_create_request",
+        ),
+        (
             "build_heartbeat_payload",
             agent.build_heartbeat_payload(config, sequence=1),
             "heartbeat_request",
@@ -138,6 +167,43 @@ class PayloadContractTests(unittest.TestCase):
                     f"{sorted(dropped)}. Pydantic le aruncă la validare, agentul "
                     f"primește 200 OK, iar câmpurile rămân None pe server.",
                 )
+
+    def test_no_builder_emits_a_nested_key_the_server_would_silently_drop(self) -> None:
+        """
+        Aceeași verificare, coborâtă în blocurile imbricate.
+
+        Fără ea, cazul `[escaladat]` de mai sus nu verifică nimic pe care cazul
+        implicit să nu-l verifice deja: cheile lui de prim nivel sunt identice,
+        deci singura lui afirmație ar fi că builder-ul nu aruncă. Contractul
+        declară `event_measurements` și `event_disclosure` ca modele proprii
+        tocmai ca să existe față de ce compara conținutul blocurilor.
+        """
+        for builder_name, payload, _ in _all_builder_cases():
+            for nested_key, nested_model in NESTED_CONTRACT_MODELS.items():
+                block = payload.get(nested_key)
+
+                if block is None:
+                    continue
+
+                with self.subTest(builder=builder_name, block=nested_key):
+                    dropped = set(block) - declared_fields(nested_model)
+                    self.assertEqual(
+                        dropped,
+                        set(),
+                        f"{builder_name} trimite chei nedeclarate de "
+                        f"{nested_model}, în blocul '{nested_key}': "
+                        f"{sorted(dropped)}. Pydantic le aruncă la validare, "
+                        f"agentul primește 200 OK, iar câmpurile rămân None.",
+                    )
+
+                    missing = required_fields(nested_model) - set(block)
+                    self.assertEqual(
+                        missing,
+                        set(),
+                        f"{builder_name} omite câmpuri obligatorii în blocul "
+                        f"'{nested_key}': {sorted(missing)}. Serverul răspunde "
+                        f"422 și payload-ul se pierde întreg.",
+                    )
 
     def test_every_builder_supplies_the_fields_the_contract_makes_mandatory(self) -> None:
         """

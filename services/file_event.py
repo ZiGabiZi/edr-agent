@@ -19,6 +19,21 @@ from uuid import uuid4
 
 FileEventCallback = Callable[[Dict[str, str]], None]
 
+# Treapta la care se inchide un eveniment de fisier. Azi exista una singura:
+# amprenta pleaca, continutul nu. Constanta e aici, nu literala la apel, ca
+# introducerea lui T1 sa fie o schimbare intr-un singur loc.
+DEFAULT_DISCLOSURE_TIER = "T0"
+
+# Vocabularul inchis al treptelor. Oglindeste VALID_DISCLOSURE_TIERS din schema
+# serverului, iar amandoua sunt legate de notele contractului prin test
+# (tests/test_disclosure_tier.py), ca sa nu poata diverge in tacere — aceeasi
+# disciplina ca la vocabularul lui hash_status.
+VALID_DISCLOSURE_TIERS = frozenset({"T0", "T1", "T2", "T3"})
+
+# Trepte la care continutul fisierului nu are voie sa fi plecat. Oglindeste
+# _CONTENTLESS_TIERS din schema serverului.
+_CONTENTLESS_TIERS = frozenset({"T0", "T1"})
+
 
 def normalize_file_path(file_path: str) -> str:
     """
@@ -40,6 +55,8 @@ def build_file_event_payload(
     hash_status: Optional[str] = None,
     file_size: Optional[int] = None,
     hash_duration_ms: Optional[int] = None,
+    tier: str = DEFAULT_DISCLOSURE_TIER,
+    content_bytes: int = 0,
 ) -> Dict[str, Any]:
     """
     Construiește payload-ul unui eveniment de fișier.
@@ -70,6 +87,32 @@ def build_file_event_payload(
             f"Invarianta contractului incalcata: sha256="
             f"{'prezent' if sha256 is not None else 'absent'} cu "
             f"hash_status={hash_status!r}. sha256 prezent <=> hash_status == 'ok'."
+        )
+
+    # Cele trei verificari de mai jos sunt oglinda exacta a lui
+    # EventDisclosure._validate_tier de pe server, in aceeasi ordine. Duplicarea
+    # e deliberata, dar trebuie sa fie COMPLETA ca sa-si merite rostul: orice
+    # verificare pe care serverul o face si agentul nu, se transforma intr-un
+    # 422 -> FatalTransportError -> EventDispatcher trateaza evenimentul ca
+    # poison message si il sterge din spool. Pierdere de date, nu camp gol.
+    # Aici esueaza la constructie, cu stack trace catre apelantul vinovat.
+    if tier not in VALID_DISCLOSURE_TIERS:
+        raise ValueError(
+            f"tier invalid: {tier!r}. "
+            f"Valori acceptate: {sorted(VALID_DISCLOSURE_TIERS)}."
+        )
+
+    if content_bytes < 0:
+        raise ValueError(
+            f"content_bytes nu poate fi negativ: {content_bytes}."
+        )
+
+    if tier in _CONTENTLESS_TIERS and content_bytes > 0:
+        raise ValueError(
+            f"tier este {tier!r} dar content_bytes este {content_bytes}. "
+            f"Treptele T0 si T1 nu divulga continut prin definitie; un numar "
+            f"pozitiv aici inseamna ori un bug de atribuire, ori un canal "
+            f"necontabilizat."
         )
 
     if hash_status == "ok" and file_size is None:
@@ -127,5 +170,16 @@ def build_file_event_payload(
 
     if measurements:
         payload["measurements"] = measurements
+
+    # Blocul insoteste exact evenimentele de fisier — vezi bicondiționalitatea
+    # din contract. Aici e neconditionat pentru ca acest builder construieste
+    # DOAR evenimente de fisier; cele de ciclu de viata au builderii lor in
+    # agent.py si raman, corect, fara treapta.
+    #
+    # content_bytes se emite si cand e zero, spre deosebire de campurile
+    # optionale de mai sus: un zero explicit la T0 e o afirmatie verificabila
+    # ("niciun octet de continut n-a plecat"), pe cand absenta ar fi
+    # ambigua intre "zero" si "nu s-a masurat".
+    payload["disclosure"] = {"tier": tier, "content_bytes": content_bytes}
 
     return payload
