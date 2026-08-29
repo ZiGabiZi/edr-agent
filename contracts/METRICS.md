@@ -310,8 +310,9 @@ logică prin care contractul de fir e testat, nu presupus.
 |---|---|
 | `X-Agent-Wire-Attempted-Bytes` | octeți predați transportului de la începutul încarnării |
 | `X-Agent-Wire-Delivered-Bytes` | octeți pentru care a venit orice răspuns HTTP |
+| `X-Agent-Instance-Id` | încarnarea căreia îi aparțin cifrele de mai sus |
 
-Ambele **exclud cererea în care sunt trimise**. Ca să declare dimensiunea
+Primele două **exclud cererea în care sunt trimise**. Ca să declare dimensiunea
 cererii curente, agentul ar trebui să pună acea dimensiune într-un antet al
 aceleiași cereri — dar antetul face parte din cerere, deci îi schimbă
 dimensiunea. Decalajul cu un mesaj rupe circularitatea fără nicio aproximare:
@@ -326,6 +327,21 @@ payload respins pentru contabilitate greșită. De aceea numele stau aici, nu î
 Valoarea zero se trimite explicit. Prima cerere a unei încarnări poartă două
 zerouri, iar asta e o afirmație verificabilă — un antet lipsă nu se distinge de
 un agent vechi, de un intermediar care taie anteturi, sau de un bug.
+
+**Încarnarea e antet pentru că serverul contabilizează în middleware**, adică
+înainte de rutare, ca să nu piardă cererile respinse cu 401 — exact traficul
+care contează cel mai mult. Un middleware nu poate citi corpul fără să consume
+fluxul așteptat de ruta de după el, deci `agent_instance_id` trebuie să existe
+și în afara corpului. Fără el, contoarele care repornesc de la zero la fiecare
+pornire a agentului ar arăta ca direcția gravă din §7.2, la fiecare restart.
+
+Agentul citește valoarea din payload-ul care o poartă oricum, ca antetul și
+corpul să nu poată spune lucruri diferite. Singurul payload fără ea e cel de
+**înregistrare**, iar acolo antetul se omite, nu se trimite gol. Consecința e
+structurală și se declară aici: octeții de înrolare ai fiecărei încarnări ajung
+în găleata de neatribuibil a serverului. Sunt puțini și mărginiți — un mesaj pe
+încarnare, plus reîncercările — dar nu dispar din raport. Se închide când
+payload-ul de înregistrare va purta și el încarnarea.
 
 Totalul e peste canale, deși §1.4 le ține separate local. Serverul vede corpuri
 și rute, nu categoriile agentului; reconcilierea are nevoie de un singur număr

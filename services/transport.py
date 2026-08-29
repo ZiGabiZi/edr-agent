@@ -48,6 +48,25 @@ JSON_CONTENT_TYPE = "application/json"
 WIRE_ATTEMPTED_HEADER = "X-Agent-Wire-Attempted-Bytes"
 WIRE_DELIVERED_HEADER = "X-Agent-Wire-Delivered-Bytes"
 
+# Încarnarea care raportează cifrele de mai sus.
+#
+# De ce e nevoie de ea pe antet, când călătorește deja în corp:
+#     Serverul contabilizează în middleware, adică înainte de rutare, ca să nu
+#     piardă cererile respinse cu 401 — exact traficul cel mai interesant. Un
+#     middleware nu poate însă citi corpul fără să consume fluxul pe care îl
+#     așteaptă ruta de după el. Antetul e singurul loc din care încarnarea se
+#     poate afla la momentul acela.
+#
+# De ce contează atât de mult încarnarea:
+#     Contoarele repornesc de la zero la fiecare pornire a agentului, prin
+#     construcție (registrul e per încarnare). Fără să știe cui aparțin cifrele,
+#     serverul ar vedea totalul raportat prăbușindu-se la zero în timp ce
+#     propriul lui total crește — adică exact direcția gravă a discrepanței
+#     (METRICS.md §7.2), declanșată fals la fiecare restart. Cu încarnarea pe
+#     antet, resetul e așteptat și atribuibil, ca la detecția de repornire prin
+#     agent_instance_id de la heartbeat.
+WIRE_INSTANCE_HEADER = "X-Agent-Instance-Id"
+
 
 class TransportError(Exception):
     """Eroare ridicată atunci când comunicarea cu serverul EDR eșuează."""
@@ -260,6 +279,35 @@ def build_wire_headers(snapshot: WireLedgerSnapshot) -> Dict[str, str]:
     }
 
 
+def build_incarnation_header(payload: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Antetul cu încarnarea, citit din payload-ul care oricum o poartă.
+
+    De ce din payload și nu dintr-un parametru nou:
+        `agent_instance_id` e deja în corpul evenimentelor, al heartbeat-urilor
+        și al evenimentelor de ciclu de viață. Citindu-l de acolo, antetul și
+        corpul nu pot ajunge niciodată să spună lucruri diferite despre aceeași
+        cerere — ceea ce un parametru separat, pasat de patru apelanți, chiar ar
+        putea. Transportul se uită într-un câmp care pleacă oricum pe fir, nu
+        capătă o a doua sursă de adevăr.
+
+    Când lipsește, antetul se OMITE, nu se trimite gol:
+        Singurul payload fără încarnare e cel de înregistrare
+        (agent.py::build_agent_registration_payload). Un antet gol ar arăta ca o
+        valoare prezentă și ar strica o cheie de contabilizare pe server; unul
+        absent spune adevărul, iar serverul are pentru asta o găleată proprie de
+        octeți neatribuibili. Consecința e structurală și declarată în
+        METRICS.md §7.1: octeții de înrolare ai fiecărei încarnări ajung acolo,
+        până când payload-ul de înregistrare va purta și el încarnarea.
+    """
+    instance_id = payload.get("agent_instance_id")
+
+    if not instance_id:
+        return {}
+
+    return {WIRE_INSTANCE_HEADER: str(instance_id)}
+
+
 def build_auth_headers(
     agent_key: Optional[str] = None,
     enrollment_secret: Optional[str] = None,
@@ -429,6 +477,7 @@ def post_request(
         # heartbeat).
         request_headers = build_json_headers(headers)
         request_headers.update(build_wire_headers(wire_ledger.snapshot()))
+        request_headers.update(build_incarnation_header(payload))
 
         # Momentul „a părăsit endpoint-ul", din METRICS.md §1.1. Se numără
         # înainte de trimitere și nu se scade niciodată: dacă cererea moare

@@ -26,6 +26,7 @@ import services.transport as transport
 from services.transport import (
     WIRE_ATTEMPTED_HEADER,
     WIRE_DELIVERED_HEADER,
+    WIRE_INSTANCE_HEADER,
     AuthenticationError,
     FatalTransportError,
     TransportError,
@@ -361,6 +362,55 @@ class WireHeadersTests(unittest.TestCase):
         self.assertEqual(headers[WIRE_ATTEMPTED_HEADER], "41")
         self.assertEqual(headers[WIRE_DELIVERED_HEADER], "41")
 
+    def test_the_incarnation_travels_as_a_header_too(self) -> None:
+        # Serverul contabilizeaza in middleware, inainte de rutare, deci nu
+        # poate citi corpul: ar consuma fluxul asteptat de ruta. Antetul e
+        # singurul loc din care poate afla cui apartin cifrele raportate.
+        session = RecordingSession()
+
+        post_request(
+            "http://server",
+            "/api/events",
+            dict(PAYLOAD, agent_instance_id="incarnare-7"),
+            channel=CHANNEL_EVENTS,
+            session=as_session(session),
+            ledger=WireLedger(),
+        )
+
+        self.assertEqual(session.calls[0]["headers"][WIRE_INSTANCE_HEADER], "incarnare-7")
+
+    def test_a_payload_without_an_incarnation_omits_the_header(self) -> None:
+        # Cazul real e inregistrarea, singurul payload fara agent_instance_id.
+        # Un antet gol ar arata ca o valoare prezenta si ar strica o cheie de
+        # contabilizare pe server; unul absent spune adevarul, iar serverul are
+        # pentru asta o galeata de octeti neatribuibili.
+        session = RecordingSession()
+
+        post_request(
+            "http://server",
+            "/api/agents/register",
+            {"agent_id": "agent-1", "hostname": "masina"},
+            channel=CHANNEL_ENROLLMENT,
+            session=as_session(session),
+            ledger=WireLedger(),
+        )
+
+        self.assertNotIn(WIRE_INSTANCE_HEADER, session.calls[0]["headers"])
+
+    def test_an_empty_incarnation_is_treated_as_absent(self) -> None:
+        session = RecordingSession()
+
+        post_request(
+            "http://server",
+            "/api/events",
+            dict(PAYLOAD, agent_instance_id=""),
+            channel=CHANNEL_EVENTS,
+            session=as_session(session),
+            ledger=WireLedger(),
+        )
+
+        self.assertNotIn(WIRE_INSTANCE_HEADER, session.calls[0]["headers"])
+
     def test_the_headers_ride_along_with_authentication(self) -> None:
         session = RecordingSession()
 
@@ -406,6 +456,7 @@ class HeadersAreDocumentedTests(unittest.TestCase):
 
         self.assertIn(WIRE_ATTEMPTED_HEADER, document)
         self.assertIn(WIRE_DELIVERED_HEADER, document)
+        self.assertIn(WIRE_INSTANCE_HEADER, document)
 
 
 class UncountedByDesignTests(unittest.TestCase):
