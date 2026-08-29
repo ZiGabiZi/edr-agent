@@ -385,22 +385,90 @@ acea încarnare (altfel e zgomotos pentru un agent liniștit și orb pentru unul
 care trimite gigaocteți). Dimensiunea tipică se calculează din contoarele de
 mesaje, nu se ghicește.
 
-### 7.4 Stadiul de azi
+### 7.4 Ce raportează reconcilierea
+
+`GET /api/metrics/disclosure` poartă o secțiune `reconciliation`. Ea nu descrie
+divulgarea, ci **dacă cifra de divulgare poate fi crezută** — de aceea stă
+alături de metrică, nu topită în ea.
+
+Fiecare încarnare primește un verdict, nu o diferență:
+
+| Verdict | Ce înseamnă |
+|---|---|
+| `within_bounds` | încadrarea din §7.2 se respectă |
+| `below_lower_bound` | serverul a primit mai puțin decât știe agentul că i-a fost livrat — contabilitate stricată de o parte sau de alta |
+| `above_upper_bound` | serverul a primit mai mult decât a trimis agentul — trafic în numele lui, sau un canal necontabilizat |
+| `unreported` | agentul n-a trimis încă un raport lizibil; stare de tranziție, nu violare |
+
+`unreported` există separat pentru că un agent vechi, sau unul aflat la prima
+cerere, nu e o problemă. Contopit cu violările, ar umple raportul cu zgomot
+exact în timpul unei actualizări de parc — adică fix când cineva chiar se uită.
+
+Diferențele se raportează **semnate**, cu numele scrise ca aritmetica lor:
+`delivered_over_received` și `received_over_attempted`. Pozitiv înseamnă margine
+ruptă. Nu există o „diferență absolută": ar face cele două direcții să arate
+identic, iar ele nu sunt deloc la fel de grave.
+
+Pe lângă ele se raportează `reported_undelivered_bytes` — ce a plecat de pe
+endpoint fără să primească vreun răspuns, după propriile contoare ale agentului.
+Nu e o discrepanță; e volumul plecat în gol, și explică o parte din jocul dintre
+margini.
+
+**Găleata de neatribuibil**, cu motivul păstrat:
+
+| Motiv | Ce s-a întâmplat |
+|---|---|
+| `no_key` | cerere fără antet de cheie — tipic, o înrolare |
+| `unknown_key` | cheie prezentă, nerecunoscută — traficul care nu ajunge la nicio rută |
+| `no_instance` | agent cunoscut, încarnare nedeclarată — azi, re-înregistrarea |
+| `unsized` | corp fără `Content-Length`; dimensiunea e **necunoscută, nu zero** |
+
+Motivele nu se contopesc. `unknown_key` e un agent cu credențiale stricate care
+divulgă tot ce trimite fără să scrie nimic nicăieri; `no_instance` e o
+consecință cunoscută a payload-ului de înregistrare. Într-un singur număr,
+niciunul n-ar mai fi lizibil.
+
+Găleata apare **întreagă și când raportul e filtrat pe un agent**. Octeții de
+acolo n-au proprietar prin definiție: dacă s-ar putea filtra pe agent, n-ar mai
+fi neatribuibili. Un raport filtrat care i-ar ascunde ar sugera că pentru
+agentul acela nu există trafic necontabilizat, ceea ce nu se poate ști.
+
+### 7.5 Stadiul de azi
 
 - `1.3a` — *livrat.* Blocul `disclosure` cu treapta și octeții ei de conținut,
   declarat, validat pe ambele părți și atribuit în tabelul de la §3.4.
-- `1.3b` — *parțial.* Partea de agent e livrată: serializare explicită în
-  transport, registrul de fir pe canale (`services/wire_ledger.py`) și
-  anteturile de la §7.1. Serverul nu contabilizează încă nimic, deci
-  reconcilierea și discrepanța ca metrică proprie rămân deschise.
+- `1.3b` — *parțial.* Livrat: serializarea explicită în transportul agentului,
+  registrul de fir pe canale (`services/wire_ledger.py`), anteturile de la §7.1,
+  contabilizarea pe server în middleware (`app/wire_middleware.py`,
+  `app/services/wire_accounting.py`) și reconcilierea de la §7.4.
 
-Până când partea de server se închide, numărătorul publicat rămâne aproximarea
-din `disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului
-stocat, care include câmpuri adăugate de server și exclude anteturile HTTP.
-Orice cifră publicată din el se declară ca **estimare**, nu ca măsurătoare —
-vezi §8.
+  Rămân deschise **două** lucruri, iar primul e cel care poartă titlul acestei
+  secțiuni:
 
-### 7.5 Ce rămâne estimat chiar și după 1.3b
+  1. **Numărătorul publicat e încă estimatul.** Cifra măsurată există, dar stă
+     alături, în `reconciliation`. Secțiunile `progressive`, `always_upload` și
+     `ratio` vin în continuare din `disclosure_metrics.py::_payload_bytes`, iar
+     factorul de calibrare din §7.6 — totalul măsurat față de suma estimărilor —
+     nu se calculează nicăieri. Până atunci, cerința „măsurat, nu estimat" e
+     pregătită, nu îndeplinită.
+  2. **Alarma** la discrepanță persistentă.
+
+**O violare cunoscută, în picioare azi.** Payload-ul de înregistrare nu poartă
+`agent_instance_id` (edr-agent#19), deci octeții lui ajung în găleata de
+neatribuibil, în timp ce agentul îi numără în totalul raportat. Marginea de jos
+din §7.2 e ruptă din prima cerere a **fiecărei** încarnări, permanent, cu
+mărimea unei înrolări. Nu e slack tolerabil, și de aceea alarma nu se
+calibrează înainte ca gaura să fie închisă: pragurile alese peste ea ar rămâne
+prea largi după.
+
+Numărătorul publicat rămâne aproximarea din
+`disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului stocat,
+care include câmpuri adăugate de server și exclude anteturile HTTP. Cifra
+măsurată există acum lângă ea, în `reconciliation`, dar până când cele două se
+închid una peste alta orice cifră publicată din estimator se declară ca
+**estimare**, nu ca măsurătoare — vezi §8.
+
+### 7.6 Ce rămâne estimat chiar și după 1.3b
 
 Registrul dă un total exact pe încarnare, nu octeți per eveniment. Distribuția
 per fișier cerută de §3.2 — mediană, p95 — are nevoie de o valoare pentru
