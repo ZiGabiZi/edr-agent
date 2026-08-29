@@ -6,6 +6,14 @@ import requests
 from requests import Response, Session
 from requests.exceptions import RequestException, Timeout, ConnectionError as RequestsConnectionError
 
+from services.wire_ledger import (
+    CHANNEL_CONTROL,
+    CHANNEL_ENROLLMENT,
+    CHANNEL_EVENTS,
+    WireLedger,
+    get_wire_ledger,
+)
+
 
 DEFAULT_TIMEOUT_SECONDS = 5
 
@@ -312,9 +320,12 @@ def post_request(
     server_url: str,
     endpoint: str,
     payload: Dict[str, Any],
+    *,
+    channel: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     session: Optional[Session] = None,
     headers: Optional[Dict[str, str]] = None,
+    ledger: Optional[WireLedger] = None,
 ) -> Dict[str, Any]:
     """
     Trimite o cerere HTTP POST cu payload JSON către serverul EDR.
@@ -322,9 +333,26 @@ def post_request(
     Corpul e serializat aici, explicit, nu de `requests` prin `json=`. Vezi
     serialize_payload() pentru motiv: fără octeții văzuți de agent, numărătorul
     de divulgare nu poate fi decât o estimare.
+
+    `channel` e obligatoriu și nu are valoare implicită, deliberat. O valoare
+    implicită ar însemna că un apelant viitor care uită să se gândească la
+    canal își vede octeții aterizând tăcut în găleata altcuiva — cel mai probabil
+    peste evenimente, adică peste exact cifra afirmației principale. Fără
+    implicit, un apel nou nu trece până nu răspunde la întrebare.
+
+    E și keyword-only, împreună cu restul argumentelor opționale. Prima formă îl
+    avea pozițional, pe locul patru, și a intrat imediat peste `headers` în
+    fake-urile din tests/test_api_authentication.py. Un argument nou strecurat
+    în mijlocul unei liste poziționale se leagă tăcut de alt parametru, iar aici
+    consecința ar fi fost un canal folosit drept antet — exact tipul de eroare
+    pe care o metrică nu are voie s-o aibă.
+
+    `ledger` există doar pentru teste: implicit se folosește registrul
+    încarnării, cel de la nivel de modul în services/wire_ledger.py.
     """
     url = build_url(server_url, endpoint)
     client = session or requests
+    wire_ledger = ledger or get_wire_ledger()
 
     try:
         # Serializarea stă înăuntrul lui try deliberat: până acum o făcea tot
@@ -341,12 +369,29 @@ def post_request(
                 f"POST payload could not be serialized: {url}"
             ) from error
 
+        # Momentul „a părăsit endpoint-ul", din METRICS.md §1.1. Se numără
+        # înainte de trimitere și nu se scade niciodată: dacă cererea moare
+        # într-un timeout, octeții tot au plecat. Un contor incrementat după
+        # răspuns ar raporta zero divulgare exact în scenariul în care agentul
+        # trimite fără oprire și nu primește nimic înapoi.
+        wire_ledger.record_attempt(channel, len(body))
+
         response = client.post(
             url,
             data=body,
             timeout=timeout,
             headers=build_json_headers(headers),
         )
+
+        # Momentul „a ajuns la server", înregistrat ÎNAINTE de handle_response,
+        # nu după. Poziția e toată ideea: handle_response ridică excepție la 401,
+        # 403, 409 și 422, iar o înregistrare de după ea ar trata fiecare refuz
+        # ca pe o nelivrare. Ca să te poată refuza, serverul trebuie mai întâi
+        # să fi primit mesajul — iar un agent cu cheia greșită care trimite ore
+        # în șir e exact traficul pe care metrica trebuie să-l arate, nu să-l
+        # ascundă.
+        wire_ledger.record_delivery(channel, len(body))
+
         return handle_response(response)
     except Timeout as error:
         raise TransportError(f"POST request timed out: {url}") from error
@@ -387,6 +432,7 @@ def register_agent(
         server_url,
         "/api/agents/register",
         agent_payload,
+        channel=CHANNEL_ENROLLMENT,
         headers=build_auth_headers(agent_key, enrollment_secret),
     )
 
@@ -406,6 +452,7 @@ def send_event(
         server_url,
         "/api/events",
         event_payload,
+        channel=CHANNEL_EVENTS,
         headers=build_auth_headers(agent_key),
     )
 
@@ -429,5 +476,6 @@ def send_heartbeat(
         server_url,
         f"/api/agents/{encoded_agent_id}/heartbeat",
         payload,
+        channel=CHANNEL_CONTROL,
         headers=build_auth_headers(agent_key),
     )

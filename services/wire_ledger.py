@@ -222,3 +222,38 @@ class WireLedger:
                     delivered_bytes=current.delivered_bytes,
                     delivered_messages=current.delivered_messages,
                 )
+
+
+# Registrul încarnării curente.
+#
+# De ce o instanță la nivel de modul, când globalele sunt de obicei o problemă:
+#     Apelurile de transport sunt împrăștiate — dispecerul cheamă send_event,
+#     agent.py cheamă send_heartbeat, register_agent și tot send_event pentru
+#     evenimentele de ciclu de viață. Pasarea unui registru prin toate ar
+#     însemna un parametru nou pe fiecare, iar un apelant care uită să-l dea nu
+#     primește o eroare: primește octeți nenumărați. Adică exact modul de eșec
+#     pe care metrica trebuie să-l excludă.
+#
+# De ce nu strică D3, deși e o stare globală:
+#     Un proces ESTE o încarnare. Obiectul se creează la import și moare cu
+#     procesul, deci durata lui de viață coincide exact cu ce trebuia să
+#     măsurăm. Aici globalul nu e un compromis, e chiar semantica cerută:
+#     dacă l-am construi la apel, cineva ar putea construi două într-o
+#     încarnare, iar totalul ar înceta să mai fie al încarnării.
+#
+# Ce rămâne testabil:
+#     post_request acceptă un registru injectat. Testele își dau al lor și nu
+#     ating instanța asta, deci nu depind de ordinea în care rulează.
+_INCARNATION_LEDGER = WireLedger()
+
+
+def get_wire_ledger() -> WireLedger:
+    """
+    Registrul încarnării curente, cel folosit implicit de transport.
+
+    Funcție, nu import direct al variabilei: un `from wire_ledger import
+    _INCARNATION_LEDGER` ar lega numele la momentul importului și ar face
+    înlocuirea imposibil de urmărit. Prin funcție, toți apelanții văd același
+    obiect și există un singur loc de căutat când te întrebi cine numără.
+    """
+    return _INCARNATION_LEDGER

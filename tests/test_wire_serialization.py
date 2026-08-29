@@ -27,6 +27,7 @@ from typing import Any, Dict, List, cast
 import requests
 from requests import Session
 
+from services.wire_ledger import CHANNEL_EVENTS, WireLedger
 from services.transport import (
     JSON_CONTENT_TYPE,
     FatalTransportError,
@@ -72,9 +73,13 @@ class _FakeResponse:
         return self._json_body
 
 
-def as_session(recorder: RecordingSession) -> Session:
+def as_session(fake: object) -> Session:
     """
-    Prezinta sesiunea falsa la semnatura lui post_request().
+    Prezinta o sesiune falsa la semnatura lui post_request().
+
+    Accepta orice obiect, nu doar RecordingSession: fisierul de contabilizare
+    foloseste si sesiuni care mor inainte de raspuns, sau care raspund doar la
+    GET. Toate au in comun exact atat cat cere post_request — o metoda de trimis.
 
     Nu e o cosmetizare de verificator de tipuri, e o inexactitate reala pe care
     o marcam intr-un singur loc. post_request() declara `Optional[Session]`, dar
@@ -86,7 +91,7 @@ def as_session(recorder: RecordingSession) -> Session:
     aplicat si lui get_request. Aceea e o curatenie separata, de facut deliberat;
     pana atunci, minciuna sta aici, explicita, si nu imprastiata prin teste.
     """
-    return cast(Session, recorder)
+    return cast(Session, fake)
 
 
 PAYLOAD = {
@@ -165,7 +170,12 @@ class PostRequestSendsPreSerializedBodyTests(unittest.TestCase):
         session = RecordingSession()
 
         post_request(
-            "http://server", "/api/events", PAYLOAD, session=as_session(session)
+            "http://server",
+            "/api/events",
+            PAYLOAD,
+            channel=CHANNEL_EVENTS,
+            session=as_session(session),
+            ledger=WireLedger(),
         )
 
         call = session.calls[0]
@@ -180,8 +190,10 @@ class PostRequestSendsPreSerializedBodyTests(unittest.TestCase):
             "http://server",
             "/api/events",
             PAYLOAD,
+            channel=CHANNEL_EVENTS,
             session=as_session(session),
             headers={"X-Agent-Key": "cheie"},
+            ledger=WireLedger(),
         )
 
         self.assertEqual(
@@ -201,7 +213,9 @@ class PostRequestSendsPreSerializedBodyTests(unittest.TestCase):
                 "http://server",
                 "/api/events",
                 {"nan": float("nan")},
+                channel=CHANNEL_EVENTS,
                 session=as_session(session),
+                ledger=WireLedger(),
             )
 
         self.assertNotIsInstance(raised.exception, FatalTransportError)
