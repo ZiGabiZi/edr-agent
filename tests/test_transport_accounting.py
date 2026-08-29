@@ -250,6 +250,25 @@ class ChannelRoutingTests(unittest.TestCase):
             CHANNEL_CONTROL,
         )
 
+    def test_registration_forwards_the_incarnation_to_the_header(self) -> None:
+        # register_agent() e singura functie care primeste incarnarea ca
+        # parametru, pentru ca e singura al carei corp n-are voie s-o poarte.
+        recorded = {}
+
+        def fake_post_request(server_url, endpoint, payload, **kwargs):
+            recorded.update(kwargs)
+            return {"status": "ok"}
+
+        with patch.object(transport, "post_request", fake_post_request):
+            register_agent(
+                "http://server",
+                {"agent_id": "agent-1"},
+                agent_key="k",
+                agent_instance_id="incarnare-3",
+            )
+
+        self.assertEqual(recorded["agent_instance_id"], "incarnare-3")
+
     def test_registration_goes_on_the_enrollment_channel(self) -> None:
         self.assertEqual(
             self._channel_used_by(
@@ -396,6 +415,50 @@ class WireHeadersTests(unittest.TestCase):
         )
 
         self.assertNotIn(WIRE_INSTANCE_HEADER, session.calls[0]["headers"])
+
+    def test_the_incarnation_can_come_from_outside_the_payload(self) -> None:
+        # Cazul inregistrarii. Contractul interzice agent_instance_id in CORPUL
+        # inregistrarii, pentru ca ar suprascrie baseline-ul de repornire
+        # inainte ca heartbeat-ul sa-l compare. Interdictia e pe corp, nu pe
+        # cerere: antetul nu trece prin schema serverului si nu ajunge in
+        # agents_store.
+        session = RecordingSession()
+        body = {"agent_id": "agent-1", "hostname": "masina"}
+
+        post_request(
+            "http://server",
+            "/api/agents/register",
+            body,
+            channel=CHANNEL_ENROLLMENT,
+            session=as_session(session),
+            ledger=WireLedger(),
+            agent_instance_id="incarnare-9",
+        )
+
+        call = session.calls[0]
+        assert call["headers"][WIRE_INSTANCE_HEADER] == "incarnare-9"
+        # Garda care conteaza: valoarea data pe langa payload nu are voie sa
+        # ajunga in corp. Daca ar ajunge, detectia de repornire moare tacut.
+        self.assertNotIn(b"agent_instance_id", call["data"])
+
+    def test_an_explicit_incarnation_wins_over_the_payload(self) -> None:
+        # Nu se intampla in practica — cele doua surse nu coexista — dar regula
+        # trebuie sa fie scrisa undeva, altfel urmatorul cititor o ghiceste.
+        session = RecordingSession()
+
+        post_request(
+            "http://server",
+            "/api/events",
+            dict(PAYLOAD, agent_instance_id="din-corp"),
+            channel=CHANNEL_EVENTS,
+            session=as_session(session),
+            ledger=WireLedger(),
+            agent_instance_id="explicita",
+        )
+
+        self.assertEqual(
+            session.calls[0]["headers"][WIRE_INSTANCE_HEADER], "explicita"
+        )
 
     def test_an_empty_incarnation_is_treated_as_absent(self) -> None:
         session = RecordingSession()

@@ -279,28 +279,40 @@ def build_wire_headers(snapshot: WireLedgerSnapshot) -> Dict[str, str]:
     }
 
 
-def build_incarnation_header(payload: Dict[str, Any]) -> Dict[str, str]:
+def build_incarnation_header(
+    payload: Dict[str, Any],
+    agent_instance_id: Optional[str] = None,
+) -> Dict[str, str]:
     """
-    Antetul cu încarnarea, citit din payload-ul care oricum o poartă.
+    Antetul cu încarnarea, din payload sau, unde corpul n-are voie s-o poarte,
+    din valoarea dată explicit.
 
-    De ce din payload și nu dintr-un parametru nou:
+    De ce implicit din payload:
         `agent_instance_id` e deja în corpul evenimentelor, al heartbeat-urilor
         și al evenimentelor de ciclu de viață. Citindu-l de acolo, antetul și
         corpul nu pot ajunge niciodată să spună lucruri diferite despre aceeași
-        cerere — ceea ce un parametru separat, pasat de patru apelanți, chiar ar
-        putea. Transportul se uită într-un câmp care pleacă oricum pe fir, nu
-        capătă o a doua sursă de adevăr.
+        cerere — ceea ce un parametru pasat de patru apelanți chiar ar putea.
 
-    Când lipsește, antetul se OMITE, nu se trimite gol:
-        Singurul payload fără încarnare e cel de înregistrare
-        (agent.py::build_agent_registration_payload). Un antet gol ar arăta ca o
-        valoare prezentă și ar strica o cheie de contabilizare pe server; unul
-        absent spune adevărul, iar serverul are pentru asta o găleată proprie de
-        octeți neatribuibili. Consecința e structurală și declarată în
-        METRICS.md §7.1: octeții de înrolare ai fiecărei încarnări ajung acolo,
-        până când payload-ul de înregistrare va purta și el încarnarea.
+    De ce există totuși parametrul, doar pentru înregistrare:
+        contracts/wire-contract.json INTERZICE `agent_instance_id` în corpul
+        înregistrării, și nu din curățenie. La repornire, reînregistrarea rulează
+        înaintea primului heartbeat, iar register_agent() de pe server face
+        update() peste înregistrarea existentă: o încarnare venită prin corpul
+        înregistrării ar suprascrie baseline-ul înainte ca heartbeat-ul să îl
+        poată compara, iar restart_detected n-ar mai fi True niciodată.
+
+        Interdicția e pe CORP, nu pe cerere. Antetul nu trece prin schema
+        serverului și nu ajunge în agents_store, deci nu atinge baseline-ul —
+        e citit de middleware-ul de contabilizare și atât. Aici cele două surse
+        nu se pot contrazice, pentru că în corp nu există nimic cu care să se
+        contrazică.
+
+    Când lipsesc amândouă, antetul se OMITE, nu se trimite gol:
+        Un antet gol ar arăta ca o valoare prezentă și ar strica o cheie de
+        contabilizare pe server; unul absent spune adevărul, iar serverul are
+        pentru asta o găleată proprie de octeți neatribuibili.
     """
-    instance_id = payload.get("agent_instance_id")
+    instance_id = agent_instance_id or payload.get("agent_instance_id")
 
     if not instance_id:
         return {}
@@ -420,6 +432,7 @@ def post_request(
     session: Optional[Session] = None,
     headers: Optional[Dict[str, str]] = None,
     ledger: Optional[WireLedger] = None,
+    agent_instance_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Trimite o cerere HTTP POST cu payload JSON către serverul EDR.
@@ -443,6 +456,9 @@ def post_request(
 
     `ledger` există doar pentru teste: implicit se folosește registrul
     încarnării, cel de la nivel de modul în services/wire_ledger.py.
+
+    `agent_instance_id` se dă explicit doar acolo unde corpul n-are voie să
+    poarte încarnarea — adică la înregistrare. Vezi build_incarnation_header().
     """
     url = build_url(server_url, endpoint)
     client = session or requests
@@ -477,7 +493,7 @@ def post_request(
         # heartbeat).
         request_headers = build_json_headers(headers)
         request_headers.update(build_wire_headers(wire_ledger.snapshot()))
-        request_headers.update(build_incarnation_header(payload))
+        request_headers.update(build_incarnation_header(payload, agent_instance_id))
 
         # Momentul „a părăsit endpoint-ul", din METRICS.md §1.1. Se numără
         # înainte de trimitere și nu se scade niciodată: dacă cererea moare
@@ -526,6 +542,7 @@ def register_agent(
     agent_payload: Dict[str, Any],
     agent_key: Optional[str] = None,
     enrollment_secret: Optional[str] = None,
+    agent_instance_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Înregistrează agentul endpoint la serverul EDR.
@@ -544,6 +561,7 @@ def register_agent(
         agent_payload,
         channel=CHANNEL_ENROLLMENT,
         headers=build_auth_headers(agent_key, enrollment_secret),
+        agent_instance_id=agent_instance_id,
     )
 
 

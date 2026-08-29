@@ -33,7 +33,7 @@
       "forbidden": [
         "agent_instance_id"
       ],
-      "notes": "agent_instance_id este interzis aici pentru ca incarnarea apartine exclusiv canalului de heartbeat. La repornire, reinregistrarea ruleaza inaintea primului heartbeat, iar register_agent() face update() peste inregistrarea existenta: o incarnare venita prin inregistrare ar suprascrie baseline-ul inainte ca heartbeat-ul sa il poata compara, si restart_detected n-ar mai fi True niciodata."
+      "notes": "agent_instance_id este interzis aici pentru ca incarnarea apartine exclusiv canalului de heartbeat. La repornire, reinregistrarea ruleaza inaintea primului heartbeat, iar register_agent() face update() peste inregistrarea existenta: o incarnare venita prin inregistrare ar suprascrie baseline-ul inainte ca heartbeat-ul sa il poata compara, si restart_detected n-ar mai fi True niciodata. Interdictia e pe CORP, nu pe cerere: incarnarea ajunge totusi la server, ca antet X-Agent-Instance-Id (contracts/METRICS.md 7.1). Antetul nu trece prin schema, deci nu ajunge in agents_store si nu atinge baseline-ul, dar da contabilizarii de octeti cheia de atribuire pe incarnare. Cine e tentat sa scoata interdictia ca sa poata contabiliza inrolarea: e deja rezolvat, pe alt canal."
     },
     "event_create_request": {
       "direction": "agent -> server",

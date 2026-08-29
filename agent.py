@@ -525,6 +525,22 @@ def register_agent_with_retry(
                 enrollment_secret=(
                     credentials.enrollment_secret if credentials else None
                 ),
+                # Încarnarea pleacă pe ANTET, nu în corp. Contractul interzice
+                # câmpul în payload-ul de înregistrare, pentru că ar suprascrie
+                # baseline-ul de repornire înainte ca heartbeat-ul să-l compare
+                # (vezi wire-contract.json::agent_register_request.notes).
+                # Antetul nu trece prin schema serverului și nu ajunge în
+                # agents_store; e citit doar de contabilizarea de octeți, care
+                # altfel n-ar putea atribui nimănui octeții de înrolare.
+                #
+                # Citire permisivă, nu _require_agent_instance_id(): acolo
+                # stricteța apără o invariantă — un payload fără încarnare
+                # omoară tăcut detecția de repornire, deci merită să oprească
+                # construcția. Aici e vorba de un antet de contabilizare, iar o
+                # metrică nu are voie să împiedice un endpoint să se înregistreze.
+                # Fără el, octeții de înrolare rămân neatribuiți — vizibil, în
+                # găleata serverului, nu pierdut.
+                agent_instance_id=config.get("agent_instance_id"),
             )
             # Răspunsul conține cheia în clar exact o dată în viața ei. Se
             # loghează doar cheile dicționarului, nu conținutul: un log rotativ

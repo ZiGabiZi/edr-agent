@@ -336,12 +336,34 @@ fluxul așteptat de ruta de după el, deci `agent_instance_id` trebuie să exist
 pornire a agentului ar arăta ca direcția gravă din §7.2, la fiecare restart.
 
 Agentul citește valoarea din payload-ul care o poartă oricum, ca antetul și
-corpul să nu poată spune lucruri diferite. Singurul payload fără ea e cel de
-**înregistrare**, iar acolo antetul se omite, nu se trimite gol. Consecința e
-structurală și se declară aici: octeții de înrolare ai fiecărei încarnări ajung
-în găleata de neatribuibil a serverului. Sunt puțini și mărginiți — un mesaj pe
-încarnare, plus reîncercările — dar nu dispar din raport. Se închide când
-payload-ul de înregistrare va purta și el încarnarea.
+corpul să nu poată spune lucruri diferite.
+
+**Excepția e înregistrarea**, iar ea merită citită cu atenție, pentru că arată
+de ce antetul nu e doar o comoditate. `wire-contract.json` **interzice**
+`agent_instance_id` în corpul înregistrării: la repornire, reînregistrarea
+rulează înaintea primului heartbeat, iar `register_agent()` face `update()`
+peste înregistrarea existentă, deci o încarnare venită prin corp ar suprascrie
+baseline-ul înainte ca heartbeat-ul să-l poată compara — și `restart_detected`
+n-ar mai fi True niciodată.
+
+Interdicția e însă pe **corp**, nu pe cerere. Antetul nu trece prin schema
+serverului, nu ajunge în `agents_store` și nu atinge baseline-ul; e citit doar
+de contabilizare. Deci încarnarea pleacă și la înregistrare, pe antet, iar
+agentul o primește ca parametru explicit — singurul loc unde sursa antetului nu
+e payload-ul.
+
+**Ce rămâne neatribuibil, și de ce e acceptabil.** La *prima* înrolare a unei
+mașini nu există încă o cheie de agent: autentificarea se face cu secretul de
+înrolare, iar `agent_id` trăiește doar în corp, pe care middleware-ul nu-l
+citește. Octeții aceia rămân în găleata `no_key`. Atribuirea lor ar cere ca
+serverul să creadă un `agent_id` nedovedit, ceea ce e exact ce refuză
+`require_identity_match` peste tot altundeva — un endpoint ar putea umfla
+cifrele altuia.
+
+Diferența față de situația de dinainte nu e cosmetică: golul era **un mesaj la
+fiecare încarnare**, adică la fiecare repornire, pentru totdeauna. Acum e **un
+mesaj o singură dată în viața unei mașini**, în prima ei încarnare. Toate
+încarnările următoare se încadrează exact.
 
 Totalul e peste canale, deși §1.4 le ține separate local. Serverul vede corpuri
 și rute, nu categoriile agentului; reconcilierea are nevoie de un singur număr
@@ -453,13 +475,18 @@ agentul acela nu există trafic necontabilizat, ceea ce nu se poate ști.
      pregătită, nu îndeplinită.
   2. **Alarma** la discrepanță persistentă.
 
-**O violare cunoscută, în picioare azi.** Payload-ul de înregistrare nu poartă
-`agent_instance_id` (edr-agent#19), deci octeții lui ajung în găleata de
-neatribuibil, în timp ce agentul îi numără în totalul raportat. Marginea de jos
-din §7.2 e ruptă din prima cerere a **fiecărei** încarnări, permanent, cu
-mărimea unei înrolări. Nu e slack tolerabil, și de aceea alarma nu se
-calibrează înainte ca gaura să fie închisă: pragurile alese peste ea ar rămâne
-prea largi după.
+**Reziduul cunoscut.** Prima înrolare a unei mașini rămâne neatribuibilă, din
+motivul explicat la §7.1: nu există încă o cheie care să dovedească identitatea,
+iar `agent_id` trăiește doar în corp. Agentul numără acei octeți în totalul
+raportat, serverul îi pune în `no_key`, deci marginea de jos din §7.2 rămâne
+ruptă cu mărimea unei înrolări — **o singură dată, în prima încarnare a
+mașinii**.
+
+Formularea de dinainte a acestei secțiuni descria același gol la **fiecare**
+încarnare, pentru că înregistrarea nu purta deloc încarnarea (edr-agent#19).
+Diferența contează pentru calibrarea alarmei: un mesaj o dată în viața unei
+mașini stă sub condiția „peste o dimensiune tipică de mesaj" din §7.3, deci nu
+cere prag lărgit. Un mesaj la fiecare repornire ar fi cerut.
 
 Numărătorul publicat rămâne aproximarea din
 `disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului stocat,

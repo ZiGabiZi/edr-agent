@@ -889,7 +889,7 @@ class RegistrationConflictTests(unittest.TestCase):
     def test_a_name_conflict_keeps_the_agent_retrying(self) -> None:
         attempts = []
 
-        def conflict(server_url, payload, agent_key=None, enrollment_secret=None):
+        def conflict(server_url, payload, agent_key=None, enrollment_secret=None, **kwargs):
             attempts.append(payload["agent_id"])
             raise IdentityConflictError("HTTP 409")
 
@@ -912,7 +912,7 @@ class RegistrationConflictTests(unittest.TestCase):
         """
         attempts = []
 
-        def rejected(server_url, payload, agent_key=None, enrollment_secret=None):
+        def rejected(server_url, payload, agent_key=None, enrollment_secret=None, **kwargs):
             attempts.append(payload["agent_id"])
             raise FatalTransportError("HTTP 422")
 
