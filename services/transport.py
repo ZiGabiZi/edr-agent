@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
@@ -13,6 +14,9 @@ DEFAULT_TIMEOUT_SECONDS = 5
 # eroare de import, ci un 401 permanent care arată ca o cheie greșită.
 AGENT_KEY_HEADER = "X-Agent-Key"
 ENROLLMENT_SECRET_HEADER = "X-Enrollment-Secret"
+
+# Tipul de conținut pe care îl punem noi, pentru că nu-l mai pune requests.
+JSON_CONTENT_TYPE = "application/json"
 
 
 class TransportError(Exception):
@@ -141,6 +145,67 @@ def parse_json_response(response: Response) -> Dict[str, Any]:
         raise TransportError("Server returned a non-JSON response") from error
 
 
+def serialize_payload(payload: Dict[str, Any]) -> bytes:
+    """
+    Transformă un payload în exact octeții care pleacă pe fir.
+
+    De ce există funcția asta, când `requests` știe deja să serializeze:
+        Cu `json=payload`, serializarea se întâmplă înăuntrul bibliotecii, după
+        ce agentul a predat obiectul. Agentul nu vede niciodată octeții pe care
+        îi trimite, deci nu poate număra decât reserializând mesajul a doua
+        oară — o estimare, nu o măsurătoare. METRICS.md §7 cere ca numărătorul
+        afirmației centrale să fie măsurat. Aici e locul unde devine posibil:
+        `len(serialize_payload(payload))` e exact ce trece prin socket.
+
+    De ce e o singură funcție, folosită peste tot:
+        Două locuri care serializează cu opțiuni diferite produc două cifre
+        diferite pentru același mesaj, iar reconcilierea agent↔server ar acuza
+        un canal necontabilizat acolo unde nu e decât o virgulă cu spațiu.
+        Definiția octetului divulgat trăiește în funcția asta, nu în apelanți.
+
+    De ce fix aceste opțiuni, și nu unele mai bune:
+        Sunt exact cele pe care le folosea `requests` până acum
+        (`json.dumps(obj, allow_nan=False)`, apoi encode UTF-8), deci comitul
+        care introduce funcția nu mută nicio cifră de divulgare.
+
+        - separatorii impliciți `(", ", ": ")` păstrează spațiul de după virgulă
+          și după două puncte. `separators=(",", ":")` ar compacta mesajele,
+          ceea ce e bun în sine, dar ar muta cifra de divulgare fără ca cineva
+          să știe de ce. Compactarea, dacă se face, se face deliberat, în
+          comitul ei, cu schimbarea de definiție consemnată în METRICS.md.
+        - `ensure_ascii=True` (implicit) scapă caracterele non-ASCII în secvențe
+          de forma backslash-u urmat de patru cifre hexa. O cale cu diacritice
+          devine astfel mai lungă în octeți decât pare în caractere — și e
+          corect așa: octeții aceia chiar pleacă de pe endpoint.
+        - `allow_nan=False` refuză NaN și Infinity, exact ca `requests`. JSON-ul
+          standard nu le are, iar serverul le-ar refuza oricum.
+    """
+    return json.dumps(payload, allow_nan=False).encode("utf-8")
+
+
+def build_json_headers(headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """
+    Adaugă `Content-Type: application/json` peste antetele primite.
+
+    Cu `json=payload`, antetul îl punea `requests`. Odată ce trimitem un corp
+    deja serializat prin `data=`, biblioteca nu mai are de unde ști că e JSON și
+    nu mai pune nimic — iar serverul ar refuza cererea. E jumătatea invizibilă a
+    trecerii la serializare explicită, și singurul mod în care pasul ăsta putea
+    strica fiecare rută deodată.
+
+    Antetul dat de apelant nu se suprascrie (comparație insensibilă la
+    majuscule, ca în `CaseInsensitiveDict`), la fel cum nu-l suprascria nici
+    `requests`. Dicționarul primit nu se modifică pe loc: apelanții îl
+    construiesc cu build_auth_headers() și n-au motiv să-l vadă crescând.
+    """
+    request_headers = dict(headers) if headers else {}
+
+    if not any(name.lower() == "content-type" for name in request_headers):
+        request_headers["Content-Type"] = JSON_CONTENT_TYPE
+
+    return request_headers
+
+
 def build_auth_headers(
     agent_key: Optional[str] = None,
     enrollment_secret: Optional[str] = None,
@@ -253,12 +318,35 @@ def post_request(
 ) -> Dict[str, Any]:
     """
     Trimite o cerere HTTP POST cu payload JSON către serverul EDR.
+
+    Corpul e serializat aici, explicit, nu de `requests` prin `json=`. Vezi
+    serialize_payload() pentru motiv: fără octeții văzuți de agent, numărătorul
+    de divulgare nu poate fi decât o estimare.
     """
     url = build_url(server_url, endpoint)
     client = session or requests
 
     try:
-        response = client.post(url, json=payload, timeout=timeout, headers=headers)
+        # Serializarea stă înăuntrul lui try deliberat: până acum o făcea tot
+        # `requests`, tot aici, iar un payload neserializabil ieșea ca
+        # InvalidJSONError — adică RequestException — și devenea TransportError,
+        # eroare temporară. Păstrăm clasificarea neschimbată, pentru că acest
+        # comit nu are voie să mute nimic observabil. Dacă un mesaj imposibil de
+        # serializat merită tratat ca poison message (FatalTransportError), e o
+        # decizie separată, cu comitul ei.
+        try:
+            body = serialize_payload(payload)
+        except (ValueError, TypeError) as error:
+            raise TransportError(
+                f"POST payload could not be serialized: {url}"
+            ) from error
+
+        response = client.post(
+            url,
+            data=body,
+            timeout=timeout,
+            headers=build_json_headers(headers),
+        )
         return handle_response(response)
     except Timeout as error:
         raise TransportError(f"POST request timed out: {url}") from error
