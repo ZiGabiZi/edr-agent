@@ -196,10 +196,14 @@ class PostRequestSendsPreSerializedBodyTests(unittest.TestCase):
             ledger=WireLedger(),
         )
 
-        self.assertEqual(
-            session.calls[0]["headers"],
-            {"X-Agent-Key": "cheie", "Content-Type": JSON_CONTENT_TYPE},
-        )
+        # Verificare pe cheile care ne interesează, nu pe dicționarul întreg:
+        # post_request adaugă și anteturile de contabilizare, apărate separat in
+        # test_transport_accounting.py. O egalitate exactă aici ar pica la
+        # fiecare antet nou, fără să spună nimic despre ce apără testul —
+        # supravietuirea antetului de autentificare langa Content-Type.
+        headers = session.calls[0]["headers"]
+        self.assertEqual(headers["X-Agent-Key"], "cheie")
+        self.assertEqual(headers["Content-Type"], JSON_CONTENT_TYPE)
 
     def test_an_unserializable_payload_stays_a_temporary_error(self) -> None:
         # Clasificarea de dinainte: `requests` ridica InvalidJSONError, adica

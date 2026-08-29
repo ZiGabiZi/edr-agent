@@ -304,18 +304,104 @@ persistentă înseamnă fie un bug, fie un canal necontabilizat. Reconcilierea n
 o verificare internă, e o proprietate verificabilă a măsurătorii — aceeași
 logică prin care contractul de fir e testat, nu presupus.
 
-**Stadiul de azi: nimic din secțiunea asta nu e implementat.** Pasul 1.3 a fost
-spart în două, iar contractul v5 a adus doar prima jumătate:
+### 7.1 Anteturile de raportare
+
+| Antet | Ce poartă |
+|---|---|
+| `X-Agent-Wire-Attempted-Bytes` | octeți predați transportului de la începutul încarnării |
+| `X-Agent-Wire-Delivered-Bytes` | octeți pentru care a venit orice răspuns HTTP |
+
+Ambele **exclud cererea în care sunt trimise**. Ca să declare dimensiunea
+cererii curente, agentul ar trebui să pună acea dimensiune într-un antet al
+aceleiași cereri — dar antetul face parte din cerere, deci îi schimbă
+dimensiunea. Decalajul cu un mesaj rupe circularitatea fără nicio aproximare:
+fiecare cifră descrie mesaje deja încheiate.
+
+Sunt anteturi, nu câmpuri în corp, din același motiv pentru care cheia de agent
+e antet (`AUTH.md` §1): descriu relația agent-server, nu evenimentul. Un câmp în
+corp ar fi trebuit adăugat în fiecare schemă și validat de server, adică un
+payload respins pentru contabilitate greșită. De aceea numele stau aici, nu în
+`wire-contract.json`, care descrie corpuri.
+
+Valoarea zero se trimite explicit. Prima cerere a unei încarnări poartă două
+zerouri, iar asta e o afirmație verificabilă — un antet lipsă nu se distinge de
+un agent vechi, de un intermediar care taie anteturi, sau de un bug.
+
+Totalul e peste canale, deși §1.4 le ține separate local. Serverul vede corpuri
+și rute, nu categoriile agentului; reconcilierea are nevoie de un singur număr
+comparabil, iar separarea rămâne pentru afirmațiile din §3.
+
+### 7.2 Proprietatea de încadrare
+
+Cele două anteturi nu sunt redundante: împreună dau o **încadrare**, nu o
+singură cifră de comparat. Pentru octeții primiți de server de la o încarnare,
+socotiți înaintea cererii curente:
+
+```
+delivered_raportat  ≤  primit_de_server  ≤  attempted_raportat
+```
+
+Marginea de jos ține pentru că un mesaj cu răspuns a fost în mod necesar primit.
+Marginea de sus ține pentru că serverul nu poate primi mai mult decât a plecat.
+
+Fiecare margine spartă înseamnă altceva, iar direcțiile **nu** se topesc într-o
+diferență absolută:
+
+- **sub marginea de jos** — serverul a primit mai puțin decât știe agentul că a
+  fost livrat. Contabilitate stricată de o parte sau de alta.
+- **peste marginea de sus** — serverul a primit mai mult decât a trimis agentul.
+  Ori cineva trimite în numele lui, ori există un canal pe care agentul nu-l
+  contabilizează. Prima e o problemă de securitate, a doua invalidează
+  numărătorul afirmației centrale. E direcția care trebuie să fie mult mai
+  sensibilă.
+
+### 7.3 Toleranța
+
+Încadrarea e exactă doar dacă nimic nu e în zbor. Toleranța **nu** e „un mesaj",
+ci **câte mesaje pot fi simultan în zbor** — azi dispecerul plus bucla de
+heartbeat. Două mesaje pot pleca într-o ordine și ajunge în alta, deci decalajul
+apare în ambele direcții și nu se poate elimina făcând fotografia contorului
+atomică cu incrementarea.
+
+Pragul se declară deci relativ, nu absolut: peste o dimensiune tipică de mesaj
+(altfel e doar traficul în zbor) **și** peste o fracțiune din totalul livrat de
+acea încarnare (altfel e zgomotos pentru un agent liniștit și orb pentru unul
+care trimite gigaocteți). Dimensiunea tipică se calculează din contoarele de
+mesaje, nu se ghicește.
+
+### 7.4 Stadiul de azi
 
 - `1.3a` — *livrat.* Blocul `disclosure` cu treapta și octeții ei de conținut,
   declarat, validat pe ambele părți și atribuit în tabelul de la §3.4.
-- `1.3b` — *deschis.* Octeții măsurați de agent, reconcilierea lor pe server, și
-  discrepanța ca metrică proprie.
+- `1.3b` — *parțial.* Partea de agent e livrată: serializare explicită în
+  transport, registrul de fir pe canale (`services/wire_ledger.py`) și
+  anteturile de la §7.1. Serverul nu contabilizează încă nimic, deci
+  reconcilierea și discrepanța ca metrică proprie rămân deschise.
 
-Până când `1.3b` se închide, numărătorul rămâne aproximarea din
-`disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului stocat,
-care include câmpuri adăugate de server și exclude anteturile HTTP. Orice cifră
-publicată din el se declară ca **estimare**, nu ca măsurătoare — vezi §8.
+Până când partea de server se închide, numărătorul publicat rămâne aproximarea
+din `disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului
+stocat, care include câmpuri adăugate de server și exclude anteturile HTTP.
+Orice cifră publicată din el se declară ca **estimare**, nu ca măsurătoare —
+vezi §8.
+
+### 7.5 Ce rămâne estimat chiar și după 1.3b
+
+Registrul dă un total exact pe încarnare, nu octeți per eveniment. Distribuția
+per fișier cerută de §3.2 — mediană, p95 — are nevoie de o valoare pentru
+fiecare mesaj în parte, iar singurul mod de a o avea în mesaj ar fi să pui
+dimensiunea mesajului în mesajul însuși. Aceeași circularitate ca la §7.1, dar
+fără decalaj care s-o rupă: acolo raportăm mesaje încheiate, aici ar trebui
+raportat mesajul curent.
+
+Asimetria se declară, nu se ascunde:
+
+- numărătorul **agregat** e măsurat;
+- cifrele **per fișier** rămân estimate prin reserializare.
+
+Rezultatul util e că totalul măsurat, comparat cu suma estimărilor, dă eroarea
+estimatorului. Cu factorul acela, cifrele per fișier se pot mărgini onest:
+„mediana e X, cu un estimator care subestimează cu Y% în agregat". Registrul nu
+înlocuiește estimatorul — îl **calibrează**.
 
 ---
 

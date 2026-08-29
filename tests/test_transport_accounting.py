@@ -1,10 +1,11 @@
 """
-Teste pentru contabilizarea octetilor in stratul de transport (pasul 1.3b.1).
-=============================================================================
+Teste pentru contabilizarea octetilor in stratul de transport (1.3b.1 si 1.3b.3).
+=================================================================================
 
 test_wire_ledger.py apara registrul ca obiect. Aici se apara CABLAREA lui: ca
 fiecare cerere chiar trece prin contoare, pe canalul corect, in cele doua
-momente corecte.
+momente corecte — si ca cifrele pleaca spre server in anteturi, decalate cu un
+mesaj.
 
 Cel mai important test din fisier e cel cu 401. Pozitia lui record_delivery in
 post_request — inainte de handle_response, nu dupa — e o linie usor de mutat
@@ -14,6 +15,7 @@ in sir apare ca si cum n-ar divulga nimic. Testul acela e singurul lucru care
 sta intre cifra publicata si eroarea aceea.
 """
 
+import pathlib
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +24,8 @@ from requests.exceptions import Timeout
 
 import services.transport as transport
 from services.transport import (
+    WIRE_ATTEMPTED_HEADER,
+    WIRE_DELIVERED_HEADER,
     AuthenticationError,
     FatalTransportError,
     TransportError,
@@ -275,6 +279,133 @@ class DefaultLedgerTests(unittest.TestCase):
         after = get_wire_ledger().snapshot().channels[CHANNEL_EVENTS]
         self.assertEqual(after.attempted_bytes - before.attempted_bytes, BODY_SIZE)
         self.assertEqual(after.delivered_bytes - before.delivered_bytes, BODY_SIZE)
+
+
+class WireHeadersTests(unittest.TestCase):
+    """
+    Anteturile poarta totalul de DINAINTEA cererii curente.
+
+    Decalajul cu un mesaj nu e o aproximare, e singurul mod de a rupe
+    circularitatea: ca sa declare dimensiunea cererii curente, agentul ar trebui
+    sa puna acea dimensiune intr-un antet al aceleiasi cereri, care ii schimba
+    dimensiunea.
+    """
+
+    def _headers_of_each_call(self, count: int, ledger: WireLedger):
+        session = RecordingSession()
+
+        for _ in range(count):
+            post_request(
+                "http://server",
+                "/api/events",
+                PAYLOAD,
+                channel=CHANNEL_EVENTS,
+                session=as_session(session),
+                ledger=ledger,
+            )
+
+        return [call["headers"] for call in session.calls]
+
+    def test_the_first_request_of_an_incarnation_declares_two_zeros(self) -> None:
+        # Zero afirmat, nu antet lipsa. Un antet absent nu se distinge de un
+        # agent vechi, de un intermediar care taie anteturi, sau de un bug.
+        headers = self._headers_of_each_call(1, WireLedger())[0]
+
+        self.assertEqual(headers[WIRE_ATTEMPTED_HEADER], "0")
+        self.assertEqual(headers[WIRE_DELIVERED_HEADER], "0")
+
+    def test_each_request_reports_everything_except_itself(self) -> None:
+        headers = self._headers_of_each_call(3, WireLedger())
+
+        self.assertEqual(headers[0][WIRE_ATTEMPTED_HEADER], "0")
+        self.assertEqual(headers[1][WIRE_ATTEMPTED_HEADER], str(BODY_SIZE))
+        self.assertEqual(headers[2][WIRE_ATTEMPTED_HEADER], str(2 * BODY_SIZE))
+
+    def test_delivered_lags_attempted_by_the_message_in_flight(self) -> None:
+        # La cererea N, mesajul N-1 e deja incheiat, deci ambele contoare il
+        # includ. Cifrele coincid pentru ca sesiunea falsa raspunde mereu; ce
+        # verificam aici e ca nu se strecoara cererea curenta in niciunul.
+        headers = self._headers_of_each_call(2, WireLedger())
+
+        self.assertEqual(headers[1][WIRE_DELIVERED_HEADER], str(BODY_SIZE))
+        self.assertEqual(headers[1][WIRE_ATTEMPTED_HEADER], str(BODY_SIZE))
+
+    def test_a_lost_message_shows_up_as_a_gap_between_the_two_headers(self) -> None:
+        # Cazul pentru care exista doua anteturi in loc de unul: un mesaj plecat
+        # fara raspuns ramane in attempted si lipseste din delivered. Serverul
+        # citeste diferenta fara sa fi vazut vreodata mesajul pierdut.
+        ledger = WireLedger()
+
+        with self.assertRaises(TransportError):
+            post_request(
+                "http://server",
+                "/api/events",
+                PAYLOAD,
+                channel=CHANNEL_EVENTS,
+                session=as_session(FailingSession(Timeout("prea tarziu"))),
+                ledger=ledger,
+            )
+
+        headers = self._headers_of_each_call(1, ledger)[0]
+        self.assertEqual(headers[WIRE_ATTEMPTED_HEADER], str(BODY_SIZE))
+        self.assertEqual(headers[WIRE_DELIVERED_HEADER], "0")
+
+    def test_the_totals_span_all_channels(self) -> None:
+        # Serverul nu vede canalele noastre, deci compara un singur numar.
+        ledger = WireLedger()
+        ledger.record_attempt(CHANNEL_CONTROL, 41)
+        ledger.record_delivery(CHANNEL_CONTROL, 41)
+
+        headers = self._headers_of_each_call(1, ledger)[0]
+
+        self.assertEqual(headers[WIRE_ATTEMPTED_HEADER], "41")
+        self.assertEqual(headers[WIRE_DELIVERED_HEADER], "41")
+
+    def test_the_headers_ride_along_with_authentication(self) -> None:
+        session = RecordingSession()
+
+        post_request(
+            "http://server",
+            "/api/events",
+            PAYLOAD,
+            channel=CHANNEL_EVENTS,
+            session=as_session(session),
+            headers={"X-Agent-Key": "cheie"},
+            ledger=WireLedger(),
+        )
+
+        headers = session.calls[0]["headers"]
+        self.assertEqual(headers["X-Agent-Key"], "cheie")
+        self.assertIn(WIRE_ATTEMPTED_HEADER, headers)
+        self.assertIn(WIRE_DELIVERED_HEADER, headers)
+
+
+class HeadersAreDocumentedTests(unittest.TestCase):
+    """
+    Numele anteturilor din cod trebuie sa apara in contract, verbatim.
+
+    E acelasi rationament care a nascut tests/wire_contract.py: un nume copiat
+    de mana in doua locuri se desincronizeaza tacut. Aici copia e intre
+    services/transport.py si contracts/METRICS.md, iar consecinta unei
+    redenumiri nedocumentate e ca serverul, scris dupa contract, cauta un antet
+    care nu mai vine — si vede zero divulgare raportata, nu o eroare.
+
+    Nu inlocuieste sincronizarea cu edr-server, care se face pe fisierul de
+    contract; verifica doar ca fisierul acela spune ce face codul.
+    """
+
+    def _metrics_contract(self) -> str:
+        contract = (
+            pathlib.Path(__file__).resolve().parents[1] / "contracts" / "METRICS.md"
+        )
+        # utf-8-sig, ca in wire_contract.py: editoarele Windows salveaza des cu BOM.
+        return contract.read_text(encoding="utf-8-sig")
+
+    def test_both_header_names_appear_in_the_metrics_contract(self) -> None:
+        document = self._metrics_contract()
+
+        self.assertIn(WIRE_ATTEMPTED_HEADER, document)
+        self.assertIn(WIRE_DELIVERED_HEADER, document)
 
 
 class UncountedByDesignTests(unittest.TestCase):

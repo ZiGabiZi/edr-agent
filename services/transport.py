@@ -11,6 +11,7 @@ from services.wire_ledger import (
     CHANNEL_ENROLLMENT,
     CHANNEL_EVENTS,
     WireLedger,
+    WireLedgerSnapshot,
     get_wire_ledger,
 )
 
@@ -25,6 +26,27 @@ ENROLLMENT_SECRET_HEADER = "X-Enrollment-Secret"
 
 # Tipul de conținut pe care îl punem noi, pentru că nu-l mai pune requests.
 JSON_CONTENT_TYPE = "application/json"
+
+# Anteturile de contabilizare: cât declară agentul că a pus pe fir până ACUM,
+# adică **fără cererea curentă**.
+#
+# De ce fără ea, deși ar fi mai simplu cu tot:
+#     Ca să declare dimensiunea cererii curente, agentul ar trebui să pună acea
+#     dimensiune într-un antet al aceleiași cereri — dar antetul face parte din
+#     cerere, deci îi schimbă dimensiunea. Circular. Raportarea decalată cu un
+#     mesaj rupe bucla fără nicio aproximare: fiecare cifră descrie mesaje deja
+#     încheiate.
+#
+# De ce anteturi și nu câmpuri în corp:
+#     Un câmp în corp ar fi trebuit adăugat în fiecare schemă de payload și
+#     validat de server ca parte a mesajului — adică un payload respins pentru
+#     contabilitate greșită. Contabilizarea e despre transport, nu despre
+#     conținut. Precedentul e stabilit de contracts/AUTH.md: ce descrie relația
+#     agent-server stă în anteturi, ce descrie evenimentul stă în corp. De aceea
+#     numele sunt aici și în METRICS.md §7, nu în wire-contract.json, care
+#     descrie corpuri.
+WIRE_ATTEMPTED_HEADER = "X-Agent-Wire-Attempted-Bytes"
+WIRE_DELIVERED_HEADER = "X-Agent-Wire-Delivered-Bytes"
 
 
 class TransportError(Exception):
@@ -214,6 +236,30 @@ def build_json_headers(headers: Optional[Dict[str, str]] = None) -> Dict[str, st
     return request_headers
 
 
+def build_wire_headers(snapshot: WireLedgerSnapshot) -> Dict[str, str]:
+    """
+    Anteturile de contabilizare, dintr-o fotografie luată înainte de trimitere.
+
+    Primește fotografia, nu registrul, tocmai ca să nu poată include din greșeală
+    cererea curentă: cine cheamă funcția a decis deja despre ce moment vorbește.
+
+    Zero se trimite explicit, nu se omite. Prima cerere a unei încarnări poartă
+    două zerouri, iar asta e o afirmație verificabilă — spre deosebire de un
+    antet lipsă, care nu se distinge de un agent vechi, de un intermediar care
+    taie anteturi, sau de un bug. Același raționament ca la zero-ul din blocul
+    `disclosure`.
+
+    Totalul e peste canale, nu pe canal. Serverul numără octeții primiți de la o
+    încarnare fără să-i despartă — el vede corpuri și rute, nu categoriile
+    noastre. Separarea pe canale rămâne locală, pentru afirmațiile din
+    METRICS.md; reconcilierea are nevoie de un singur număr comparabil.
+    """
+    return {
+        WIRE_ATTEMPTED_HEADER: str(snapshot.totals.attempted_bytes),
+        WIRE_DELIVERED_HEADER: str(snapshot.totals.delivered_bytes),
+    }
+
+
 def build_auth_headers(
     agent_key: Optional[str] = None,
     enrollment_secret: Optional[str] = None,
@@ -369,6 +415,21 @@ def post_request(
                 f"POST payload could not be serialized: {url}"
             ) from error
 
+        # Fotografia se ia ÎNAINTE de record_attempt, nu după: anteturile poartă
+        # totalul de dinaintea cererii curente, altfel ar declara dimensiunea
+        # mesajului în care se află.
+        #
+        # Sub concurență, fotografia poate rămâne cu un mesaj-două în urmă față
+        # de ce a plecat efectiv, dacă celălalt fir înregistrează între timp.
+        # Nu încercăm să facem fotografia și incrementarea atomice, pentru că
+        # n-ar rezolva problema reală: două mesaje pot pleca într-o ordine și
+        # ajunge în alta, deci decalajul rămâne oricum. Consecința se declară,
+        # nu se ascunde — toleranța reconcilierii nu e „un mesaj în zbor", ci
+        # „câte mesaje pot fi simultan în zbor" (azi: dispecerul plus bucla de
+        # heartbeat).
+        request_headers = build_json_headers(headers)
+        request_headers.update(build_wire_headers(wire_ledger.snapshot()))
+
         # Momentul „a părăsit endpoint-ul", din METRICS.md §1.1. Se numără
         # înainte de trimitere și nu se scade niciodată: dacă cererea moare
         # într-un timeout, octeții tot au plecat. Un contor incrementat după
@@ -380,7 +441,7 @@ def post_request(
             url,
             data=body,
             timeout=timeout,
-            headers=build_json_headers(headers),
+            headers=request_headers,
         )
 
         # Momentul „a ajuns la server", înregistrat ÎNAINTE de handle_response,
