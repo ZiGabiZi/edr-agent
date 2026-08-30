@@ -404,8 +404,37 @@ atomică cu incrementarea.
 Pragul se declară deci relativ, nu absolut: peste o dimensiune tipică de mesaj
 (altfel e doar traficul în zbor) **și** peste o fracțiune din totalul livrat de
 acea încarnare (altfel e zgomotos pentru un agent liniștit și orb pentru unul
-care trimite gigaocteți). Dimensiunea tipică se calculează din contoarele de
-mesaje, nu se ghicește.
+care trimite gigaocteți). Cele două condiții trebuie îndeplinite **simultan**;
+cu „sau" în loc de „și", fiecare ar anula apărarea celeilalte.
+
+Valorile de azi:
+
+| Parametru | Valoare | De ce |
+|---|---|---|
+| mesaje tolerate în zbor | 3 | dispecerul, bucla de heartbeat, plus decalajul de un mesaj al raportului |
+| fracțiune, `below_lower_bound` | 5% | contabilitate stricată de o parte sau de alta |
+| fracțiune, `above_upper_bound` | 1% | trafic în numele agentului sau canal necontabilizat |
+
+Direcția gravă e de cinci ori mai sensibilă, deliberat.
+
+**Ambele mărimi se calculează din măsurătorile serverului, nu din cifrele
+raportate.** Dimensiunea tipică e `received_bytes / received_messages`, iar
+fracțiunea se aplică peste `received_bytes`. Un prag calibrat pe cifre raportate
+s-ar lărgi singur exact atunci când raportarea e stricată — adică ar tăcea când
+trebuie să vorbească.
+
+**Verdictul și depășirea de prag sunt lucruri diferite**, iar metrica le
+raportează separat. Verdictul spune că încadrarea din §7.2 e ruptă; depășirea
+spune că ruptura e mai mare decât zgomotul cererilor în zbor. O încadrare ruptă
+sub prag rămâne vizibilă în `reconciliation`, dar nu ajunge în jurnal.
+
+Alarma emite la nivel `error`, cel mult o dată la interval, **per încarnare și
+per direcție**. Per direcție pentru că o încarnare care trece de la o margine la
+cealaltă spune ceva nou, nu repetă. Verificarea se face la fiecare cerere —
+discrepanța n-are eveniment propriu, e o stare care se poate schimba doar când
+sosesc cifre noi — dar emiterea nu, pentru că un log care se repetă la nesfârșit
+e un log pe care înveți să-l filtrezi, și atunci alarma a dispărut fără să fie
+ștearsă.
 
 ### 7.4 Ce raportează reconcilierea
 
@@ -455,38 +484,90 @@ acolo n-au proprietar prin definiție: dacă s-ar putea filtra pe agent, n-ar ma
 fi neatribuibili. Un raport filtrat care i-ar ascunde ar sugera că pentru
 agentul acela nu există trafic necontabilizat, ceea ce nu se poate ști.
 
+**Adopția: încarnări prinse din mers.**
+
+Contabilizarea trăiește în memoria procesului server. Când serverul repornește
+iar agentul nu, încarnarea dispare de pe server, dar contoarele agentului cresc
+mai departe — ele sunt per încarnare, nu per conexiune. Prima cerere de după
+repornire aduce un total mare lângă un cont cu zero măsurat.
+
+Aceea **nu e o discrepanță**: nu se poate reconcilia ce n-ai apucat să măsori. E
+o linie de bază. Primul raport nenul al unei încarnări necunoscute se adoptă ca
+punct zero, iar comparațiile ulterioare se fac pe **creșterea** de la adopție
+încoace — pe ambele părți deodată.
+
+Condiția „nenul" desparte cele două cazuri: un agent care tocmai a pornit
+raportează zerouri, iar acolo comparația cu zero măsurat e corectă, fiindcă e
+chiar începutul încarnării.
+
+Adopția e oglinda tratamentului pentru repornirea **agentului**: acolo,
+încarnarea nouă face contoarele să pornească de la zero pe ambele părți
+simultan; aici doar o parte s-a resetat, deci diferența se scoate din comparație
+explicit. Fără ea, fiecare repornire de server declanșa alarma pentru fiecare
+agent care rula (edr-server#11).
+
+**Ce s-a pierdut se declară.** Rândul poartă `adoption.adopted_mid_flight` și
+`adoption.unmeasured_before_adoption_bytes`, iar rezumatul le adună. Cifra e
+divulgare reală pe care *acest* server n-a măsurat-o, și vine de la agent, deci
+e raportată, nu măsurată. Fără ea, „am prins încarnarea târziu" și „totul se
+potrivește" ar arăta identic — am fi înlocuit o alarmă falsă cu o tăcere falsă.
+
+Consecință pentru §7.5: un numărător `measured` nenul, lângă un
+`unmeasured_before_adoption_bytes` nenul, e **incomplet, nu greșit**. Cine
+publică cifra trebuie să citească ambele.
+
+Aceeași mecanică acoperă și reziduul primei înrolări: octeții de dinaintea
+emiterii cheii apar acum ca linie de bază declarată, nu ca margine de jos ruptă.
+
 ### 7.5 Stadiul de azi
 
 - `1.3a` — *livrat.* Blocul `disclosure` cu treapta și octeții ei de conținut,
   declarat, validat pe ambele părți și atribuit în tabelul de la §3.4.
-- `1.3b` — *parțial.* Livrat: serializarea explicită în transportul agentului,
+- `1.3b` — *livrat.* Serializarea explicită în transportul agentului,
   registrul de fir pe canale (`services/wire_ledger.py`), anteturile de la §7.1,
   contabilizarea pe server în middleware (`app/wire_middleware.py`,
-  `app/services/wire_accounting.py`) și reconcilierea de la §7.4.
+  `app/services/wire_accounting.py`), reconcilierea de la §7.4 și **numărătorul
+  măsurat** cu factorul de calibrare de la §7.6.
 
-  Rămân deschise **două** lucruri, iar primul e cel care poartă titlul acestei
-  secțiuni:
+  `progressive.total_bytes` vine acum din octeții numărați de server pe canalul
+  de evenimente, iar `progressive.numerator_source` spune, în același obiect,
+  dacă cifra e `measured` sau `estimated`. Nimeni nu mai poate publica una
+  crezând că e cealaltă.
 
-  1. **Numărătorul publicat e încă estimatul.** Cifra măsurată există, dar stă
-     alături, în `reconciliation`. Secțiunile `progressive`, `always_upload` și
-     `ratio` vin în continuare din `disclosure_metrics.py::_payload_bytes`, iar
-     factorul de calibrare din §7.6 — totalul măsurat față de suma estimărilor —
-     nu se calculează nicăieri. Până atunci, cerința „măsurat, nu estimat" e
-     pregătită, nu îndeplinită.
-  2. **Alarma** la discrepanță persistentă.
+  **Zero măsurat nu e o măsurătoare.** Contabilizarea trăiește în memoria
+  procesului; un agent care nu-și declară încarnarea, sau un server repornit,
+  lasă zero octeți măsurați lângă evenimente reale. Zero publicat ca numărător
+  ar însemna „endpoint-ul acesta n-a divulgat nimic" — cea mai flatantă
+  minciună posibilă despre un sistem de confidențialitate. Se tratează deci ca
+  absență de măsurătoare, iar cifra revine la estimare, declarată ca atare.
+
+  **Conținutul nu se adună peste cifra măsurată.** Estimatul e `plic + conținut`
+  pentru că plicul reserializează evenimentul stocat, iar conținutul e declarat
+  separat. Măsurătoarea e corpul întreg al cererii: când T2/T3 vor trimite
+  conținut, el va călători *în* corp, deci e deja înăuntru. `content_bytes`
+  rămâne raportat, dar ca **defalcare** a numărătorului măsurat, nu ca termen al
+  lui.
+
+  Alarma la discrepanță persistentă e livrată (`app/services/wire_alarm.py`),
+  cu pragurile de la §7.3. Cu ea, `1.3b` e **închis**.
 
 **Reziduul cunoscut.** Prima înrolare a unei mașini rămâne neatribuibilă, din
 motivul explicat la §7.1: nu există încă o cheie care să dovedească identitatea,
 iar `agent_id` trăiește doar în corp. Agentul numără acei octeți în totalul
-raportat, serverul îi pune în `no_key`, deci marginea de jos din §7.2 rămâne
-ruptă cu mărimea unei înrolări — **o singură dată, în prima încarnare a
-mașinii**.
+raportat, serverul îi pune în `no_key`.
 
-Formularea de dinainte a acestei secțiuni descria același gol la **fiecare**
-încarnare, pentru că înregistrarea nu purta deloc încarnarea (edr-agent#19).
-Diferența contează pentru calibrarea alarmei: un mesaj o dată în viața unei
-mașini stă sub condiția „peste o dimensiune tipică de mesaj" din §7.3, deci nu
-cere prag lărgit. Un mesaj la fiecare repornire ar fi cerut.
+Nu mai apare însă ca margine ruptă: mecanica de adopție din §7.4 îi tratează ca
+linie de bază declarată, cu mărimea raportată la
+`adoption.unmeasured_before_adoption_bytes`. E o descriere mai onestă a
+aceleiași realități — octeții nu dispar, dar nici nu sunt acuzați ca discrepanță
+ceea ce e doar o parte a încarnării pe care serverul n-a apucat s-o măsoare.
+
+**Ce rămâne nemăsurat, și de ce e vizibil.** Două situații lasă octeți reali în
+afara numărătorului măsurat: prima înrolare a unei mașini, și tot ce a trimis un
+agent înainte de ultima repornire a serverului. Amândouă se raportează, la
+`no_key` respectiv la `adoption`. Un numărător `measured` lângă un
+`unmeasured_before_adoption_bytes` nenul e incomplet, nu greșit — iar §8 cere ca
+diferența să fie declarată, nu presupusă. Un mesaj la fiecare repornire ar fi cerut.
 
 Numărătorul publicat rămâne aproximarea din
 `disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului stocat,
@@ -511,8 +592,37 @@ Asimetria se declară, nu se ascunde:
 
 Rezultatul util e că totalul măsurat, comparat cu suma estimărilor, dă eroarea
 estimatorului. Cu factorul acela, cifrele per fișier se pot mărgini onest:
-„mediana e X, cu un estimator care subestimează cu Y% în agregat". Registrul nu
+„mediana e X, cu un estimator care greșește cu Y% în agregat". Registrul nu
 înlocuiește estimatorul — îl **calibrează**.
+
+**Direcția erorii se citește din factor, nu se presupune.** O formulare
+anterioară a acestei secțiuni dădea ca exemplu un estimator care *subestimează*.
+Primele măsurători au arătat inversul: factorul iese sub 1, adică reserializarea
+dă **mai mult** decât a plecat pe fir. Cauza e vizibilă în ce se reserializează —
+evenimentul *stocat* poartă câmpuri adăugate de server (`event_id`,
+`received_at`, `status`) și câmpurile nule declarate explicit, pe care agentul nu
+le-a trimis niciodată.
+
+Consecința practică: cine mărginește cifrele per fișier cu factorul trebuie să se
+uite la valoarea lui, nu la o intuiție despre sensul erorii. Un factor sub 1 mută
+cifrele per fișier în jos, nu în sus.
+
+Factorul se publică în secțiunea `calibration`, ca `measured_bytes /
+estimated_bytes`. Fără măsurătoare e `null`, nu `1.0`: un factor de unu ar
+spune că estimatorul e exact, ceea ce e o afirmație, nu o absență.
+
+**Factorul nu e curat, și confundătorul se raportează lângă el.** Măsurătoarea
+numără fiecare plecare — §1.3, coada e at-least-once — și numără și cererile
+respinse; estimatorul reserializează evenimentele *stocate*, adică o dată
+fiecare. Deci factorul amestecă două lucruri: cât greșește reserializarea și de
+câte ori a plecat același eveniment.
+
+`calibration.messages_per_metered_event` desparte cele două. Cât timp e ~1,
+factorul descrie estimatorul și poate mărgini cifrele per fișier. Când crește,
+o parte din el descrie retransmisiile, iar o cifră „calibrată" cu el ar
+transfera costul retransmisiilor asupra fiecărui fișier — inclusiv asupra celor
+care au plecat o singură dată. Cine publică o cifră calibrată trebuie să vadă
+amândouă numerele, de aceea stau în același obiect.
 
 ---
 
