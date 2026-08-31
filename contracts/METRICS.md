@@ -551,6 +551,27 @@ emiterii cheii apar acum ca linie de bază declarată, nu ca margine de jos rupt
   Alarma la discrepanță persistentă e livrată (`app/services/wire_alarm.py`),
   cu pragurile de la §7.3. Cu ea, `1.3b` e **închis**.
 
+- `1.4` — *livrat.* Evenimentele persistă în SQLite, iar noțiunea de **rulare de
+  măsurătoare** face persistența utilizabilă în loc de dăunătoare. Definițiile
+  și cele trei decizii sunt la §9.
+
+  **Măsurătoarea nu se lipește pe orice rulare.** Contabilizarea de fir numără
+  octeți de la pornirea procesului și nu știe nimic despre rulări; numărătorul
+  măsurat vine de acolo. Publicat lângă o rulare pe care procesul n-a
+  observat-o, ar fi numărul altcuiva purtând autoritatea unei măsurători — o
+  rudă mai gravă a lui „zero măsurat nu e o măsurătoare": nu e zero, e cifra
+  altui experiment.
+
+  Regula: numărătorul e `measured` doar dacă procesul n-a primit evenimente în
+  nicio altă rulare decât cea cerută. Altfel cifrele măsurate rămân raportate,
+  dar ca diagnostic al procesului — `measured.applies_to_numerator` e fals,
+  `measured.attribution` spune de ce, iar numărătorul revine la estimare.
+
+  Consecință operațională, nu ocolibilă prin cod: **citește metrica înainte să
+  deschizi altă rulare în același proces.** O măsurătoare urmată de o sesiune de
+  depanare, fără repornire între ele, pierde atribuirea măsurătorii pentru
+  amândouă.
+
 **Reziduul cunoscut.** Prima înrolare a unei mașini rămâne neatribuibilă, din
 motivul explicat la §7.1: nu există încă o cheie care să dovedească identitatea,
 iar `agent_id` trăiește doar în corp. Agentul numără acei octeți în totalul
@@ -600,8 +621,13 @@ anterioară a acestei secțiuni dădea ca exemplu un estimator care *subestimeaz
 Primele măsurători au arătat inversul: factorul iese sub 1, adică reserializarea
 dă **mai mult** decât a plecat pe fir. Cauza e vizibilă în ce se reserializează —
 evenimentul *stocat* poartă câmpuri adăugate de server (`event_id`,
-`received_at`, `status`) și câmpurile nule declarate explicit, pe care agentul nu
-le-a trimis niciodată.
+`received_at`, `run_id`, `status`) și câmpurile nule declarate explicit, pe care
+agentul nu le-a trimis niciodată.
+
+`run_id` s-a alăturat listei odată cu §9 și crește plicul reserializat cu
+aproximativ 25 de octeți per eveniment. Merge în aceeași direcție ca celelalte —
+împinge factorul mai jos — deci nu schimbă concluzia, dar schimbă valoarea, iar
+o comparație cu factori măsurați înainte de 1.4 trebuie să știe asta.
 
 Consecința practică: cine mărginește cifrele per fișier cu factorul trebuie să se
 uite la valoarea lui, nu la o intuiție despre sensul erorii. Un factor sub 1 mută
@@ -631,8 +657,145 @@ amândouă numerele, de aceea stau în același obiect.
 O metrică publicată fără contextul de mai jos e o cifră care poate fi citită
 greșit, iar responsabilitatea e a celui care a publicat-o.
 
+- **rularea de măsurătoare** din care vine cifra, și dacă eticheta ei a fost
+  dată de un om sau inventată de server (§9)
 - corpusul: câte fișiere, ce distribuție de dimensiuni, ce fracțiune malițioasă
 - suprapunerea între endpoint-uri, când cifra e per parc
 - golul din §2.1, pe statusuri
+- dacă numărătorul e măsurat sau estimat, și — când e estimat lângă o
+  contabilizare nenulă — motivul (§7.5)
 - politica activă și calibrarea parametrului de cost
 - pentru afirmații despre rate: marginea superioară din §4.3
+
+**Din 1.4, prima jumătate a listei călătorește cu cifra.** Răspunsul rutei de
+metrică poartă pe prima poziție blocul `run`, cu eticheta, sursa ei, ora
+deschiderii și numărul de evenimente; la agregat, `runs_covered` numește
+rulările componente. Un cititor care sare peste documentul acesta primește
+totuși declarația, iar unul care copiază cifra fără bloc se vede că a tăiat-o.
+
+Obligația nu dispare, se mută: ce nu poate spune serverul — distribuția de
+dimensiuni a corpusului, fracțiunea malițioasă, suprapunerea între endpoint-uri
+— rămâne de declarat de mână, în intrarea de tip `masuratoare` din jurnal.
+
+---
+
+## 9. Rularea de măsurătoare
+
+### 9.1 De ce există
+
+Cât timp depozitul de evenimente murea la repornirea serverului, igiena era
+gratuită și nimeni n-o proiectase: porneai serverul, făceai experimentul,
+citeai cifra — iar cifra descria exact experimentul, fiindcă nu mai era nimic
+altceva înăuntru. Corpusul cerut de §8 era implicit corect.
+
+Persistența desființează accidentul. Evenimentele se adună peste zile și peste
+experimente diferite, iar o metrică nefiltrată ar amesteca o probă cu 444 de
+fișiere, o rulare de depanare cu trei și un test de parc cu douăzeci de agenți
+într-o singură medie care nu descrie niciunul dintre ele — arătând exact ca
+înainte.
+
+Deci persistența fără noțiunea de rulare face **rău net**: schimbă o cifră care
+descrie ceva într-una care nu descrie nimic, păstrându-i aparența. Măsurat pe o
+probă de trei fișiere, o singură sesiune de depanare cu un fișier de 12 octeți
+umflă raportul experimentului cu circa treizeci la sută.
+
+**Definiție.** O rulare de măsurătoare e o etichetă lipită pe fiecare eveniment
+**la ingestie**, care spune din ce experiment face parte. Serverul are exact o
+rulare curentă; evenimentele primite până la următoarea schimbare o poartă pe ea.
+
+Eticheta se pune la ingestie, nu la citire. Aplicată la citire, fiecare
+experiment nou ar goli experimentele vechi mutându-le evenimentele la el, iar
+cifrele publicate ieri s-ar schimba azi fără ca nimeni să fi atins datele.
+
+### 9.2 Cum se numește o rulare — decizia D1
+
+Două surse, amândouă necesare:
+
+- **generată**, la prima nevoie de o etichetă, cu prefixul rezervat `auto-`. E
+  plasa de siguranță: niciun eveniment nu rămâne neetichetat, iar comportamentul
+  de dinainte de persistență — o repornire = un experiment nou — se păstrează
+  fără nicio muncă în plus.
+- **dată de operator**, prin `POST /api/runs/{eticheta}`. E instrumentul.
+
+Eticheta de operator trebuie să fie **numele intrării de tip `masuratoare` din
+jurnal**. Atunci legătura dintre ce s-a promis că se măsoară și ce date au ieșit
+devine verificabilă, nu declarată: oricine ia numele din jurnal, îl dă
+serverului și primește exact cifrele acelui experiment. Fără ea, legătura e pe
+încredere.
+
+Prefixul `auto-` e refuzat operatorului, ca întrebarea „cine a numit rularea" să
+aibă răspuns și peste șase luni.
+
+**O etichetă folosită o dată nu se mai poate redeschide.** E singurul mod în
+care mecanismul poate minți: date noi turnate în cifre deja citate, cu un
+răspuns care arată identic — același nume, alte numere. Aceeași regulă ca în
+jurnal, unde un commit de montaj nu se modifică prin `amend` sau `push --force`.
+Refuzul e 409, iar registrul etichetelor trăiește în aceeași bază cu
+evenimentele: în memorie s-ar fi golit exact la repornirea care face refolosirea
+probabilă.
+
+**Rularea curentă NU supraviețuiește repornirii, deliberat.** Registrul e
+persistent, indicatorul spre rularea deschisă nu. Alternativa — o rulare de
+operator rămasă deschisă peste restarturi — ar aduna tăcut, peste săptămâni, tot
+ce trimite parcul, inclusiv sesiuni de depanare fără legătură cu experimentul;
+adică exact refolosirea de etichetă interzisă mai sus, doar automatizată.
+
+Prețul se declară: **un experiment întrerupt de o repornire nu se poate relua
+sub aceeași etichetă.** Se continuă sub una nouă, iar analiza le adună explicit
+pe amândouă. Ruptura vizibilă e preferabilă lipiturii invizibile.
+
+### 9.3 Ce descrie o cifră, implicit — decizia D2
+
+Implicit, **rularea curentă**. Agregatul peste tot depozitul se cere explicit,
+prin `all_runs`.
+
+Implicitul nu e comoditate. Tot istoricul e mai util operațional și mai
+periculos pentru o lucrare: o medie peste experimente cu distribuții diferite de
+fișiere nu descrie niciunul dintre ele. Se poate cere — dar se cere, iar
+răspunsul își numește componentele în `runs_covered`.
+
+**O etichetă necunoscută primește 404, nu un rezultat gol.** Un răspuns gol
+pentru o etichetă scrisă greșit ar arăta exact ca un experiment care n-a
+divulgat nimic — cea mai flatantă cifră posibilă despre un sistem de
+confidențialitate, obținută dintr-o greșeală de tastare. O rulare care există și
+chiar n-a produs evenimente se deosebește: eticheta ei e în registru, deci
+primește zero, cu rularea declarată alături.
+
+### 9.4 Un singur proces — decizia D3
+
+Serverul rulează cu un singur worker, iar asta e **declarat**, nu presupus.
+
+Ce garantează SQLite peste procese: modul WAL permite mai mulți cititori
+simultan cu un scriitor, iar scrierile concurente se serializează prin blocajele
+lui proprii — baza nu se corupe dacă cineva pornește un al doilea proces. Ce
+**nu** rezultă de aici e că sistemul ar funcționa. Partea care se rupe e
+contabilitatea din memorie:
+
+- `wire_accounting` ține contoarele per proces, deci aceeași încarnare ar fi
+  numărată în două locuri, iar reconcilierea de la §7.4 ar raporta două jumătăți
+  ca și cum ar fi două întregi;
+- rularea curentă e tot per proces, deci doi workeri porniți în aceeași secundă
+  ar eticheta evenimente cu două nume diferite.
+
+WAL e ales pentru cititor-care-nu-blochează-scriitorul: metrica citește tot
+tabelul rulării și altfel ar bloca ingestia chiar în timpul unei măsurători.
+
+### 9.5 Ce nu persistă, și de ce
+
+- **registrul de agenți** rămâne volatil. Cheile au fost scoase din el tocmai
+  pentru că se golește la repornire, iar agenții se re-înregistrează singuri;
+  persistat, ar readuce credențialele în raza rutei publice de inventar.
+- **contabilizarea de fir** rămâne per încarnare, în memorie (D3). Consecința
+  ei asupra numărătorului măsurat e la §7.5.
+- **mulțimea rulărilor observate de proces**, folosită de aceeași regulă,
+  trăiește tot în memorie: întrebarea la care răspunde e despre procesul curent,
+  nu despre istoric.
+
+### 9.6 Ce rămâne deschis
+
+- Dacă serverul va rula vreodată cu mai mulți workeri, `wire_accounting` trebuie
+  mutat în bază, iar blocajul de proces al depozitului nu mai e suficient.
+- Deschiderea unei rulări se autorizează azi cu secretul de înrolare, singura
+  credențială de nivel de operator existentă. E o reutilizare declarată, nu o
+  scăpare, dar un secret de operator propriu e pasul care o închide, odată cu
+  rutele de citire.
