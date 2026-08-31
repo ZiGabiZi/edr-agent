@@ -245,7 +245,50 @@ Consecința: cele 30% unice sunt disproporționat interesante. Acolo stau
 necunoscutele și malware-ul, deci acolo se declanșează banda. Suprapunerea de
 70% e masa ieftină; restul e unde se măsoară de fapt protocolul.
 
-### 6.4 Ordinea de adăugare
+### 6.4 Prevalența nu poate fi binară
+
+Împărțirea din §6 — comun tuturor sau unic pe o mașină — pare completă, dar are
+o consecință care nu se vede până nu se numără: **prevalența ia exact două
+valori.** Un fișier apare fie pe o mașină, fie pe toate.
+
+Asta desființează, tăcut, jumătate din ce se pretinde. Deduplicarea și
+escaladarea conștientă de prevalență sunt afirmații despre o *relație*: cu cât
+un fișier e mai răspândit, cu atât costul lui marginal e mai mic. O relație
+măsurată în două puncte e o dreaptă trasată prin ele — nu se poate distinge de
+oricare altă formă care trece prin aceleași două puncte.
+
+Cazul lipsă e și cel mai interesant: fișierul văzut pe două-trei mașini. Acolo
+mecanismul chiar decide ceva. La o mașină nu are ce economisi; la toate,
+economia e evidentă și neinteresantă.
+
+**Cele 30% unice se distribuie deci pe 1-3 mașini, după o formă declarată:**
+
+| Strat | pe 1 mașină | pe 2 | pe 3 |
+|---|---|---|---|
+| benign unic | 70% | 20% | 10% |
+| malițios unic | 85% | 12% | 3% |
+
+Proporția 70/30 din §6 rămâne neschimbată — ea se referă la **numărul de
+fișiere**, nu la numărul de plasări. Ce se schimbă e că suprapunerea se declară
+de acum în două feluri: câte fișiere sunt comune și câte plasări totale există
+în parc.
+
+**De ce malițiosul are altă formă decât benignul.** Un fișier benign prezent pe
+două-trei mașini din cinci e banal: aceeași aplicație instalată de câțiva
+oameni. Un fișier malițios pe trei din cinci mașini e o infecție de parc — cazul
+special pe care §6.3 îl exclude tocmai fiindcă nu descrie o organizație
+obișnuită. Coada de 3% există ca acel caz să apară totuși, o dată, ca să poată fi
+arătat; nu ca să fie tipic.
+
+**Ce susține și ce nu susține alegerea asta.** Susține demonstrarea
+mecanismului: la a doua apariție a aceluiași hash, serverul cere mai puțin, iar
+diferența e măsurabilă. Nu susține o rată și nici o curbă netedă — zece fișiere
+la prevalență 3 sunt un studiu de caz, nu o statistică, și se raportează ca
+atare. Un grafic „economie în funcție de prevalență" trasat prin patru puncte,
+dintre care unul se sprijină pe zece fișiere, trebuie să arate câte fișiere stau
+sub fiecare punct.
+
+### 6.5 Ordinea de adăugare
 
 `METRICS.md` §3.1 cere ca endpoint-urile să fie adăugate **eșalonat, cu ordinea
 fixată înainte de măsurătoare**. Pornite simultan, costul marginal nu se poate
