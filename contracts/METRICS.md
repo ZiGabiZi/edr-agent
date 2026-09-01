@@ -46,7 +46,7 @@ endpoint-ul de două ori, deci se numără de două ori.
 
 **Traficul server→agent.** Rulesetul coborât, directivele, verdictele. Ele merg
 în direcția opusă și nu ating suprafața de atac descrisă în §2.2. Costul lor se
-raportează separat, la §2.7.
+raportează separat, la §2.8.
 
 **Fișierele pe care agentul le-a citit local.** Un fișier de 200 MB hash-uit pe
 endpoint costă I/O, nu divulgare. Costul acela e o măsurătoare, nu un octet
@@ -140,7 +140,7 @@ obiecția e legitimă. Marginalul nu se poate explica altfel: al `N`-lea endpoin
 trimite mai puțin decât primul **numai** pentru că serverul știe deja ce sunt
 fișierele. Deduplicarea și prevalența nu au unde să se ascundă.
 
-**Constrângere de montaj**, obligatorie la §2.11: endpoint-urile se adaugă
+**Constrângere de montaj**, obligatorie la §2.12: endpoint-urile se adaugă
 eșalonat, cu ordinea fixată înainte de măsurătoare. Pornite simultan, marginalul
 nu se poate atribui.
 
@@ -205,6 +205,24 @@ Se raportează chiar și când o singură treaptă există. Un tabel în care `T
 **Definiție.** Verdictul produs de **același motor de analiză** alimentat cu
 fișierul integral, adică sistemul rulat în modul `always_upload`.
 
+**Unde rulează.** Modul `always_upload` rulează **pe endpoint**, nu pe server.
+Rulesetul coboară deja (§2.8), deci același motor poate fi alimentat cu fișierul
+integral acolo unde fișierul se află; peste fir trece doar verdictul.
+
+Precizarea nu e detaliu de implementare, e precondiție de montaj. Un oracol
+calculat pe server ar cere ca fiecare fișier din corpus să ajungă acolo:
+5 × 26 GB ≈ 130 GB către o mașină cu 66 GB liberi. Oracolul n-ar fi scump, ar fi
+imposibil — iar imposibilitatea s-ar descoperi la prima rulare completă, nu aici.
+
+Distincția decide de două ori dacă montajul există, și în sensuri opuse: numitorul
+definit mai sus e contrafactual — „ce *ar fi* părăsit endpoint-ul" — deci nu
+mișcă niciun octet; oracolul e o rulare adevărată și i-ar mișca pe toți.
+Definiții care sună la fel, cost care diferă cu 130 GB.
+
+Consecința pentru corpus: fișierele nu trebuie să fie rezidente simultan pe
+endpoint — lotul în lucru îi ajunge oracolului la fel ca protocolului, fiindcă
+amândouă citesc același fișier în aceeași trecere.
+
 Oracolul **nu** e eticheta reală. Poate greși. Tocmai de aceea afirmația din
 §2.4 e independentă de calitatea rulesetului: orice divergență e, prin
 construcție, o eroare de calibrare a benzii — adică obiectul lucrării.
@@ -226,7 +244,7 @@ Pentru fiecare fișier din corpus, exact una dintre:
 
 **Divergența nu se raportează niciodată ca scalar.** „3% divergență" ascunde
 dacă e vorba de malware ratat sau de timp de analist irosit, iar cele două nu se
-compară. Funcția de cost din §2.6 le ponderează asimetric; metrica trebuie să
+compară. Funcția de cost din §2.7 le ponderează asimetric; metrica trebuie să
 poată alimenta acea pondere.
 
 **Abținerea are coloană proprie.** Contopită cu `ratare`, umflă divergența
@@ -284,7 +302,7 @@ convenție, și se păstrează și aici.
 | `hash_duration_ms` | costul de citire al treptei T0 |
 | latență per treaptă | timpul până la verdict, pe fiecare treaptă |
 
-Niciuna nu e octet divulgat. Toate sunt intrări în funcția de cost din §2.6 —
+Niciuna nu e octet divulgat. Toate sunt intrări în funcția de cost din §2.7 —
 motiv pentru care se instrumentează odată cu treapta pe care o măsoară, nu la
 evaluare.
 
