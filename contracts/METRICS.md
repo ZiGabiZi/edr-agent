@@ -15,6 +15,12 @@ să existe hashing — și singurul motiv pentru care raportul de divulgare se p
 calcula azi. O metrică definită după ce mecanismul funcționează măsoară ce e
 ușor de măsurat, nu ce trebuia.
 
+**Convenția de referințe.** `§N` fără altă calificare trimite întotdeauna la o
+secțiune a **acestui** document. O secțiune din alt contract se scrie calificat,
+`CORPUS.md §5.4`. O secțiune a **lucrării** poartă prefixul `L`: `§L2.4`.
+Fără prefix, `§2.1` ar însemna două lucruri diferite în aceeași frază — iar
+numerotarea lucrării se mută la fiecare secțiune inserată, a celui de aici nu.
+
 ---
 
 ## 1. Octetul divulgat
@@ -23,7 +29,7 @@ ușor de măsurat, nu ce trebuia.
 agent→server, indiferent dacă a ajuns, dacă a fost acceptat sau dacă a mai fost
 trimis o dată.
 
-Definiția vine din §2.2, modelul de amenințări: datele care părăsesc
+Definiția vine din §L2.2, modelul de amenințări: datele care părăsesc
 endpoint-ul fac parte din suprafața de atac. Un octet retransmis a părăsit
 endpoint-ul de două ori, deci se numără de două ori.
 
@@ -45,8 +51,8 @@ endpoint-ul de două ori, deci se numără de două ori.
 în numărător și numitor.
 
 **Traficul server→agent.** Rulesetul coborât, directivele, verdictele. Ele merg
-în direcția opusă și nu ating suprafața de atac descrisă în §2.2. Costul lor se
-raportează separat, la §2.8.
+în direcția opusă și nu ating suprafața de atac descrisă în §L2.2. Costul lor se
+raportează separat, la §L2.8.
 
 **Fișierele pe care agentul le-a citit local.** Un fișier de 200 MB hash-uit pe
 endpoint costă I/O, nu divulgare. Costul acela e o măsurătoare, nu un octet
@@ -132,7 +138,7 @@ direcția care flatează afirmația.
 **Definiție.** Octeții divulgați de al `N`-lea endpoint adăugat parcului, cu
 aceeași sarcină de lucru, măsurați după stabilizarea lui.
 
-E metrica ce poartă afirmația principală din §2.4.
+E metrica ce poartă afirmația principală din §L2.4.
 
 **De ce marginalul și nu media.** Media scade și dacă protocolul n-ar face nimic
 inteligent — un cost fix împărțit la mai mulți scade prin aritmetică, iar
@@ -140,7 +146,7 @@ obiecția e legitimă. Marginalul nu se poate explica altfel: al `N`-lea endpoin
 trimite mai puțin decât primul **numai** pentru că serverul știe deja ce sunt
 fișierele. Deduplicarea și prevalența nu au unde să se ascundă.
 
-**Constrângere de montaj**, obligatorie la §2.12: endpoint-urile se adaugă
+**Constrângere de montaj**, obligatorie la §L2.12: endpoint-urile se adaugă
 eșalonat, cu ordinea fixată înainte de măsurătoare. Pornite simultan, marginalul
 nu se poate atribui.
 
@@ -160,7 +166,7 @@ dacă schimbi directorul monitorizat, fără să atingi protocolul. O metrică p
 o poți muta cu un ISO nu poate purta o afirmație.
 
 **P95 contează cel puțin cât mediana.** E singurul loc în care apare predicția
-din §2.4 — că sub un prag de dimensiune protocolul transferă *mai mult* decât
+din §L2.4 — că sub un prag de dimensiune protocolul transferă *mai mult* decât
 always-upload, fiindcă plicul plus vectorul de trăsături depășesc fișierul
 însuși. Fișierele mici se adună în coada distribuției. Raportată doar mediana,
 predicția proprie ar fi ascunsă exact acolo unde se verifică.
@@ -206,7 +212,7 @@ Se raportează chiar și când o singură treaptă există. Un tabel în care `T
 fișierul integral, adică sistemul rulat în modul `always_upload`.
 
 **Unde rulează.** Modul `always_upload` rulează **pe endpoint**, nu pe server.
-Rulesetul coboară deja (§2.8), deci același motor poate fi alimentat cu fișierul
+Rulesetul coboară deja (§L2.8), deci același motor poate fi alimentat cu fișierul
 integral acolo unde fișierul se află; peste fir trece doar verdictul.
 
 Precizarea nu e detaliu de implementare, e precondiție de montaj. Un oracol
@@ -224,7 +230,7 @@ endpoint — lotul în lucru îi ajunge oracolului la fel ca protocolului, fiind
 amândouă citesc același fișier în aceeași trecere.
 
 Oracolul **nu** e eticheta reală. Poate greși. Tocmai de aceea afirmația din
-§2.4 e independentă de calitatea rulesetului: orice divergență e, prin
+§L2.4 e independentă de calitatea rulesetului: orice divergență e, prin
 construcție, o eroare de calibrare a benzii — adică obiectul lucrării.
 
 Comparația se face **pe amprentă**, nu pe cale: verdictele sunt legate de
@@ -244,7 +250,7 @@ Pentru fiecare fișier din corpus, exact una dintre:
 
 **Divergența nu se raportează niciodată ca scalar.** „3% divergență" ascunde
 dacă e vorba de malware ratat sau de timp de analist irosit, iar cele două nu se
-compară. Funcția de cost din §2.7 le ponderează asimetric; metrica trebuie să
+compară. Funcția de cost din §L2.7 le ponderează asimetric; metrica trebuie să
 poată alimenta acea pondere.
 
 **Abținerea are coloană proprie.** Contopită cu `ratare`, umflă divergența
@@ -270,7 +276,7 @@ finit nu înseamnă zero ratări în general: la zero eșecuri în `N` încercă
 reală se poate susține doar sub aproximativ `3/N`. Formularea corectă e „nicio
 ratare observată pe `N` mostre malițioase, ceea ce mărginește rata sub `X`%".
 
-Consecință directă asupra corpusului, la §1.6: pentru „sub 1%" sunt necesare cel
+Consecință directă asupra corpusului, la `CORPUS.md` §2.1: pentru „sub 1%" sunt necesare cel
 puțin **300 de mostre malițioase**. Sub 100, nu se poate susține nimic util
 despre ratări, oricât de curat ar ieși rezultatul.
 
@@ -302,7 +308,7 @@ convenție, și se păstrează și aici.
 | `hash_duration_ms` | costul de citire al treptei T0 |
 | latență per treaptă | timpul până la verdict, pe fiecare treaptă |
 
-Niciuna nu e octet divulgat. Toate sunt intrări în funcția de cost din §2.7 —
+Niciuna nu e octet divulgat. Toate sunt intrări în funcția de cost din §L2.7 —
 motiv pentru care se instrumentează odată cu treapta pe care o măsoară, nu la
 evaluare.
 

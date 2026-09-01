@@ -10,6 +10,12 @@ parte din listă — distribuția de dimensiuni, fracțiunea malițioasă, supra
 mână. Documentul acesta e locul unde acele valori se **fixează înainte** de
 măsurătoare, ca declarația de mai târziu să fie o citire, nu o reconstrucție.
 
+**Convenția de referințe.** `§N` fără altă calificare trimite întotdeauna la o
+secțiune a **acestui** document. O secțiune din alt contract se scrie calificat,
+`CORPUS.md §5.4`. O secțiune a **lucrării** poartă prefixul `L`: `§L2.4`.
+Fără prefix, `§2.1` ar însemna două lucruri diferite în aceeași frază — iar
+numerotarea lucrării se mută la fiecare secțiune inserată, a celui de aici nu.
+
 ---
 
 ## 1. Corpusul e un instrument, nu un set de date
@@ -111,7 +117,7 @@ trebui să facă.
 
 | Palier | Număr | De ce |
 |---|---|---|
-| sub 2 KB | ~50 | zona în care predicția din §2.4 se verifică |
+| sub 2 KB | ~50 | zona în care predicția din §L2.4 se verifică |
 | 2 KB – 100 KB | ~300 | fișiere mici obișnuite |
 | restul | ~1150 | distribuit natural, cum vine din surse |
 
