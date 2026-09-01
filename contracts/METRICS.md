@@ -690,6 +690,8 @@ greșit, iar responsabilitatea e a celui care a publicat-o.
   contabilizare nenulă — motivul (§7.5)
 - politica activă și calibrarea parametrului de cost
 - pentru afirmații despre rate: marginea superioară din §4.3
+- **amprenta instantaneului de reputație**, sursele consultate cu versiunile
+  lor, și **brațul ablației** — rece sau semiînzestrat (§8.1)
 
 **Din 1.4, prima jumătate a listei călătorește cu cifra.** Răspunsul rutei de
 metrică poartă pe prima poziție blocul `run`, cu eticheta, sursa ei, ora
@@ -700,6 +702,61 @@ totuși declarația, iar unul care copiază cifra fără bloc se vede că a tăi
 Obligația nu dispare, se mută: ce nu poate spune serverul — distribuția de
 dimensiuni a corpusului, fracțiunea malițioasă, suprapunerea între endpoint-uri
 — rămâne de declarat de mână, în intrarea de tip `masuratoare` din jurnal.
+
+### 8.1 Depozitul de reputație
+
+Ce știe sistemul înainte de orice analiză decide direct cât se poate închide la
+T0, deci decide cifra din titlu. O măsurătoare care nu declară asta descrie un
+sistem care nu se poate reconstitui.
+
+**Amprenta instantaneului.** SHA-256 peste octeții fișierului, calculată la
+cerere și verificabilă din afară cu `sha256sum`. Ea răspunde la o singură
+întrebare — *ce a citit serverul când a produs cifra asta* — și e singura care
+o poate face, fiindcă fișierul e sigilat și deschis `mode=ro&immutable=1`.
+
+Nu se confundă cu amprenta de **conținut**, care trece peste rânduri în ordinea
+hash-ului și sare peste tot ce e ceas. Aceea dovedește că un import e idempotent
+și că altcineva a reconstruit același lucru; nu spune ce fișier a fost deschis.
+Două importuri identice rulate la ore diferite au aceeași amprentă de conținut
+și amprente de fișier diferite. Lângă o cifră merge prima.
+
+**Sursele consultate, cu versiunile lor.** Nu ce conține depozitul, ci ce s-a
+citit din el: selecția surselor e parametru de rulare, nu proprietate a
+fișierului. Versiunea contează fiindcă amprenta acoperă fișierul livrat, nu
+procesul care l-a produs — sursele externe se schimbă, ediții de RDS se retrag,
+inventarele se rotesc. Versiunea consemnată transformă „nu se poate reproduce"
+în „se poate reproduce dacă mai există ediția asta", ceea ce e o afirmație
+onestă în loc de una tăcută.
+
+**Brațul ablației, și de ce nu e opțional.** Selecția corpusului a fost făcută
+DIN inventarul de amenințări, deci mulțimea malițioasă a corpusului e submulțime
+a acelei surse. Un instantaneu care o conține închide **tot** stratul malițios la
+T0, iar raportul de divulgare iese spectaculos fără ca protocolul să fi făcut
+ceva. Asta e brațul **semiînzestrat**; brațul **rece** se obține excluzând sursa
+la interogare.
+
+Diferența dintre cele două nu e o verificare de robustețe, e chiar măsurătoarea
+care separă contribuția protocolului de arta anterioară. **O cifră de divulgare
+raportată fără să spună care braț a fost rulat nu înseamnă nimic**, fiindcă
+poate fi produsă și de o simplă listă de hash-uri.
+
+**Acoperirea peste corpus**, o dată per instantaneu: ce fracțiune din stratul
+realist e cunoscută ca software, ce fracțiune din stratul de stres e cunoscută
+ca amenințare, și contorul de suprapunere. E numitorul moral al rezultatului —
+fără el, un raport de divulgare bun nu se poate deosebi de un corpus care se
+întâmplă să fie deja cunoscut.
+
+**Registrul de prevalență nu se amprentează, și cerința asta ar fi imposibilă.**
+Depozitul importat e un fișier sigilat; registrul de prevalență e derivat din
+evenimente, deci starea lui e o funcție de câte evenimente au intrat până în
+acel moment. Se declară ca **stare la începutul rulării** — număr de hash-uri
+distincte și număr de agenți distincți — nu ca amprentă. Fără distincția asta,
+secțiunea de față ar cere ceva ce nu există pentru jumătate din reputație.
+
+Prevalența se numără **pe agenți distincți, nu pe evenimente**. O singură mașină
+care atinge un fișier de cinci sute de ori nu e un parc, iar greșeala nu produce
+nicio eroare — doar o cifră mai mare în direcția favorabilă, exact felul de
+eroare pe care evaluarea nu o prinde.
 
 ---
 
