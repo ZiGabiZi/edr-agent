@@ -272,6 +272,53 @@ Fără declarația asta cifra nu spune nimic: „61,5% necunoscut" e chiar difer
 dintre cele două brațe ale ablației, iar fără identitatea depozitului ar putea fi
 oricare dintre ele.
 
+### 3.6 Prevalența în parc
+
+**Definiție.** Pentru fiecare conținut văzut în rulare, pe câte mașini distincte
+îl știe parcul — publicat ca histogramă. E memoria PROPRIE a sistemului, spre
+deosebire de §3.5, care descrie cunoașterea împrumutată dintr-un instantaneu
+extern.
+
+**Numitorul e `distinct_hashes` — CONȚINUTURI distincte, nu evenimente.** Un
+fișier văzut pe cinci mașini produce cinci evenimente și un singur rând în
+histogramă. E al treilea numitor al raportului, după `events_with_tier` (§3.4) și
+`events_with_hash` (§3.5), iar cele trei nu se adună: un procent calculat peste
+două dintre ele n-ar descrie niciuna.
+
+**Histograma descrie starea de ACUM, nu valorile răspunse atunci.** Prevalența se
+schimbă în timpul rulării, deci același fișier a primit `1` la primul endpoint și
+`5` la ultimul. O distribuție peste răspunsuri ar descrie în bună parte ordinea
+sosirii, nu parcul; iar starea finală e cea comparabilă cu proiectarea corpusului
+(`CORPUS.md` §6), deci singura care poate fi infirmată.
+
+Ce s-a răspuns atunci nu se pierde: se raportează separat, ca
+`events_at_first_sighting` față de `events_with_prior_sighting` — câte evenimente
+au sosit la un conținut pe care parcul îl vedea prima oară, față de unul pe care
+îl știa deja.
+
+**Nu se publică nicio economie.** „Câte escaladări a evitat parcul" cere să se
+știe care evenimente ar fi escaladat, iar decizia aceea aparține benzii de
+incertitudine (§L2.7). Tabelul numără; interpretarea rămâne a pasului care are
+dreptul s-o facă.
+
+**Registrul NU se amprentează.** Spre deosebire de instantaneul de reputație, se
+schimbă în timpul rulării, deci o amprentă ar fi falsă înainte ca rularea să se
+termine — ar arăta ca garanția de la §8.1 fără să o poată ține. Se declară în
+schimb **poziția de plecare**: câte conținuturi și câte mașini erau în registru
+când s-a deschis rularea, consemnate înainte de prima vedere a rulării. Registrul
+e global peste rulări — memoria unui parc nu se golește când operatorul
+redenumește experimentul — deci fără poziția de plecare două rulări cu aceleași
+evenimente ar publica cifre incomparabile fără ca nimic să spună de ce.
+
+**Golul de atribuire**, ca la §2.1: evenimentele care poartă hash dar n-au bloc
+de prevalență — scrise înainte ca registrul să existe — se raportează ca
+`hashed_events_without_prevalence`, niciodată contopite cu „prima vedere".
+
+**Limitare declarată.** E prevalență *observată*, nu reală: numără mașinile care
+au **raportat** conținutul, nu pe cele care îl au. Un endpoint oprit, unul cu
+coada plină sau unul care n-a atins încă directorul monitorizat lipsesc din
+număr, iar cifra e prin urmare o subestimare.
+
 ---
 
 ## 4. Fidelitatea față de oracol
