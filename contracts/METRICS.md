@@ -185,6 +185,15 @@ cifra sugerează o proprietate a protocolului pe care nu o are.
 Pentru fiecare treaptă `T0`–`T3`: procentul de verdicte închise acolo, octeții
 divulgați cumulat până acolo, și latența până la verdict.
 
+**„Închis" înseamnă aici treapta declarată de AGENT**, adică axa divulgării: cât
+a plecat din fișier până la verdict. Din P2.3 serverul conchide și el ceva la
+`T0` — dispoziția de reputație de la §3.5 — iar cele două nu sunt același lucru
+și nu se adună. Un eveniment care poartă treapta `T0` și primește dispoziția
+`unknown` a divulgat la T0 fără să se închidă acolo. Până la P2.3 fraza de mai
+sus n-avea niciun referent, fiindcă nimic nu măsura închiderea; de atunci are
+doi, iar orice cifră publicată sub numele „închis la T0" trebuie să spună care
+dintre cele două axe o produce.
+
 **Numitorul tabelului este mulțimea evenimentelor care poartă o treaptă**, nu
 mulțimea tuturor evenimentelor. Evenimentele de ciclu de viață (`agent_startup`,
 `agent_shutdown`, `agent_restart`) nu sunt pe scara de divulgare prin
@@ -201,6 +210,67 @@ dispar din raport: intră în golul de atribuire de la §2.1.
 
 Se raportează chiar și când o singură treaptă există. Un tabel în care `T0`
 închide 100% e o observație corectă despre stadiul de atunci, nu un rând gol.
+
+### 3.5 Dispoziția de la T0
+
+**Definiție.** Pentru fiecare valoare a dispoziției de reputație, câte evenimente
+ale rulării au primit-o. E ce a conchis **serverul** consultând depozitul, nu ce
+a declarat agentul că a divulgat.
+
+**Numitorul e `events_with_hash`** — evenimentele care poartă `sha256`, adică
+exact acelea pentru care serverul avea ce căuta. Prin invarianta de la v3
+(`sha256` prezent ⟺ `hash_status == 'ok'`), mulțimea e aceeași cu „evenimentele
+cu hash reușit". Evenimentele de ciclu de viață și cele cu hash eșuat nu sunt în
+ea, și nu ca excludere convenabilă: pentru ele n-a existat nicio interogare.
+
+**Vocabularul are cinci valori**, și e o bijecție cu ce stochează depozitul —
+cele patru celule ale 2×2-ului de la §8.1, plus indisponibilitatea:
+
+| valoare | ce spune |
+|---|---|
+| `known_malicious` | dovadă externă de amenințare; poartă proveniența sursei |
+| `known_software` | prezent într-o listă de software cunoscut; **nu** înseamnă curat |
+| `both_axes` | prezent pe ambele axe; celula de suprapunere, care nu se colapsează |
+| `unknown` | depozitul a fost întrebat și nu știe; e candidatul la treapta următoare |
+| `reputation_unavailable` | depozitul **nu a putut fi întrebat** |
+
+**Ultimele două nu au voie să fie contopite.** `unknown` e un răspuns cu
+conținut — chiar cel care justifică escaladarea. `reputation_unavailable` spune
+că nu s-a pus nicio întrebare. Adunate, o pană a instantaneului ar produce exact
+cifra unui corpus complet nou, adică rezultatul cel mai favorabil afirmației
+centrale, obținut dintr-o defecțiune. Un instantaneu lipsă ar imita perfect
+brațul rece al ablației, fără nicio eroare vizibilă nicăieri.
+
+Evenimentul se acceptă și atunci: refuzat cu 5xx, disponibilitatea telemetriei ar
+fi cuplată de cea a reputației, iar coada at-least-once (§1.3) ar reîncerca la
+nesfârșit un eveniment perfect valid.
+
+**Nu se publică o rată de închidere.** Ar cere maparea *dispoziție → închis*, iar
+aceea e decizia benzii de incertitudine (§L2.7), nu a unui tabel. Cazul care o
+face nebanală e `known_software`: numărat ca închis, ar transforma apartenența la
+o listă de software cunoscut în verdict de benignitate — exact ce interzice
+`CORPUS.md` §5.4, doar că pe ușa din dos a unei metrici. Se publică deci
+contoarele și numitorul; cine vrea rata o compune **declarând ce a numărat ca
+închis**.
+
+**Golul de atribuire, ca la §2.1.** Evenimentele care poartă hash dar n-au
+dispoziție — scrise înainte ca serverul să consulte depozitul — se raportează
+separat, ca `hashed_events_without_disposition`. Numărate ca `unknown`, o rulare
+veche ar arăta ca un corpus complet nou; e aceeași confuzie ca mai sus, mutată pe
+axa timpului. O valoare pe care vocabularul n-o cunoaște nu se absoarbe nici ea:
+se numără sub numele ei.
+
+**Ce se declară lângă cifră** (§8.1): amprenta instantaneului care a răspuns,
+sursele consultate cu versiunile lor, și brațul ablației. Identitatea se
+consemnează **pe rulare**, nu pe eveniment — o rulare vede exact un instantaneu,
+fiindcă fișierul se deschide o dată per proces, `immutable=1` e promisiunea că nu
+se schimbă dedesubt, iar o etichetă de rulare nu poate fi redeschisă. Repetată pe
+fiecare eveniment, lista surselor ar fi aceeași repetiție pe care schema
+depozitului o evită stocând sursa ca întreg.
+
+Fără declarația asta cifra nu spune nimic: „61,5% necunoscut" e chiar diferența
+dintre cele două brațe ale ablației, iar fără identitatea depozitului ar putea fi
+oricare dintre ele.
 
 ---
 
