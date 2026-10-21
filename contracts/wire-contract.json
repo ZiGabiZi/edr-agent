@@ -1,5 +1,5 @@
 {
-  "contract_version": 9,
+  "contract_version": 10,
   "title": "Contractul de fir EDR (agent <-> server)",
   "why": [
     "O cheie pe care schema serverului nu o declara nu ajunge niciodata in store: Pydantic o arunca la validare, agentul primeste 200 OK, iar campul ramane None. Serverul o logheaza acum cu numele ei (app/schemas/wire.py::WireModel), deci greseala nu mai e complet tacuta — dar logul apare abia cand un payload gresit ajunge efectiv la server, intr-o rulare reala. Contractul muta descoperirea mai devreme: la commit, in repo-ul care a gresit, ca esec de suita, inainte ca payload-ul sa fie trimis vreodata.",
@@ -92,10 +92,11 @@
       "optional": [
         "agent_version",
         "sequence",
-        "agent_instance_id"
+        "agent_instance_id",
+        "monitoring"
       ],
       "forbidden": [],
-      "notes": "agent_instance_id este sursa autoritara pentru detectia de repornire; sequence serveste la numararea incercarilor de heartbeat care nu au ajuns (failed_attempts), NU la masurarea duratei unei pene: incercarile sunt rarite de backoff exponential, iar ferestrele ratate sunt derivate server-side din last_seen. Ambele sunt optionale in schema pentru compatibilitate cu build-uri vechi, dar agentul curent le trimite intotdeauna: absenta lor face continuitatea negarantabila (vezi continuity_lost)."
+      "notes": "agent_instance_id este sursa autoritara pentru detectia de repornire; sequence serveste la numararea incercarilor de heartbeat care nu au ajuns (failed_attempts), NU la masurarea duratei unei pene: incercarile sunt rarite de backoff exponential, iar ferestrele ratate sunt derivate server-side din last_seen. Ambele sunt optionale in schema pentru compatibilitate cu build-uri vechi, dar agentul curent le trimite intotdeauna: absenta lor face continuitatea negarantabila (vezi continuity_lost). Campul monitoring (v10) spune daca endpoint-ul e supravegheat, recalculat de agent la FIECARE heartbeat, nu o data la pornire: supravegherea poate cadea si in timpul rularii. Vocabular inchis: 'active' (observer-ul, releaser-ul, hasher-ul si dispecerul sunt vii), 'spool_unavailable' (spool-ul nu s-a deschis, deci pipeline-ul de fisiere nu a pornit), 'monitor_unavailable' (spool-ul exista, dar FileMonitor nu a pornit, ex. niciun director valid), 'stopped' (pipeline-ul pornise, dar unul din firele lui a murit). Orice valoare in afara de 'active' inseamna endpoint NEsupravegheat. Absenta campului inseamna necunoscut (build vechi), nu oprit. Heartbeat-ul e canalul ales pentru ca e singurul care functioneaza cand spool-ul a cazut; un eveniment emis de agent ar depinde exact de componenta care lipseste. Valoare in afara vocabularului NU da 422: la heartbeat 422 opreste bucla pana la repornire, deci un agent mai nou ar aparea mort in loc de orb. Serverul o stocheaza ca 'unrecognized' (tot non-activ) si logheaza valoarea bruta. monitoring NU schimba status-ul derivat: 'degraded' ramane 'heartbeat intarziat', iar un agent poate fi 'online' si orb simultan. Starea NU apare pe rutele publice de citire (GET /api/agents, GET /api/events): lista masinilor oarbe e o harta de tintire. Se citeste doar prin GET /api/agents/monitoring, cu secretul de operator (AUTH.md §6). Campul e auto-declarat de agent, deci prinde DEFECTE (spool care nu se deschide, director lipsa, fir mort), nu SABOTAJ: un atacator care controleaza endpoint-ul poate trimite 'active' in continuare. Detectia sabotajului cere o verificare pe care agentul nu o poate falsifica singur (METRICS.md §8). La fiecare schimbare de stare (cu exceptia necunoscut -> 'active', pornirea normala) serverul emite evenimentul agent_monitoring_changed, ca la agent_restart: registrul de agenti e volatil, evenimentul e persistat si poarta eticheta rularii de masuratoare (METRICS.md §8)."
     },
     "heartbeat_response": {
       "direction": "server -> agent",

@@ -147,7 +147,7 @@ def _all_builder_cases() -> list:
         ),
         (
             "build_heartbeat_payload",
-            agent.build_heartbeat_payload(config, sequence=1),
+            agent.build_heartbeat_payload(config, sequence=1, monitoring="active"),
             "heartbeat_request",
         ),
     ]
@@ -287,7 +287,7 @@ class LifecycleEventCorrelationTests(unittest.TestCase):
         config = _make_config()
 
         startup = agent.build_startup_event_payload(config)
-        heartbeat = agent.build_heartbeat_payload(config, sequence=1)
+        heartbeat = agent.build_heartbeat_payload(config, sequence=1, monitoring="active")
 
         self.assertEqual(startup["agent_instance_id"], heartbeat["agent_instance_id"])
 

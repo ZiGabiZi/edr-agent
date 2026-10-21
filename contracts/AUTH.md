@@ -153,6 +153,12 @@ Declarat explicit, nu presupus.
   luată explicit la închiderea proiectării Etapei 0. Ce garantează totuși
   proiectarea de acum: prin ele **nu se scurg credențiale**, pentru că depozitul
   de chei e separat de `agents_store`, iar cheile sunt stocate hash-uite.
+  Și **nu se scurge starea supravegherii** (contract v10): câmpul `monitoring` lipsește
+  din `GET /api/agents`, iar evenimentul `agent_monitoring_changed` lipsește din
+  `GET /api/events`. O listă a mașinilor oarbe ar fi o hartă de țintire pentru
+  atacator, nu un inventar. Ambele se citesc prin `GET /api/agents/monitoring`,
+  care cere secretul de înrolare. E aceeași reutilizare declarată ca la
+  `POST /api/runs/{eticheta}`, până la secretul de analist.
 - **Cheia nu e criptată la repaus** pe endpoint și nu e legată de mașină (fără
   DPAPI, fără TPM). E protejată doar prin permisiuni de fișier. Un administrator
   local o poate citi — dar el poate oricum citi memoria procesului agent, unde

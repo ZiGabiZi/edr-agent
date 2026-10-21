@@ -211,7 +211,60 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def build_heartbeat_payload(config: Dict[str, Any], sequence: int) -> Dict[str, Any]:
+# Vocabularul câmpului monitoring din heartbeat (contract v10). Orice valoare
+# în afară de MONITORING_ACTIVE înseamnă că endpoint-ul NU e supravegheat.
+MONITORING_ACTIVE = "active"
+MONITORING_SPOOL_UNAVAILABLE = "spool_unavailable"
+MONITORING_MONITOR_UNAVAILABLE = "monitor_unavailable"
+MONITORING_STOPPED = "stopped"
+
+
+def assess_monitoring(
+    event_spool: Optional[EventSpool],
+    file_monitor: Optional[FileMonitor],
+    event_dispatcher: Optional[EventDispatcher],
+) -> str:
+    """
+    Răspunde la „supraveghează agentul ăsta ceva, acum?".
+
+    Se apelează la fiecare heartbeat, nu o dată la pornire. Primele două
+    stări se fixează la pornire, dar a treia apare oricând: un fir mort în
+    pipeline oprește supravegherea fără nicio altă urmă, iar agentul rămâne
+    "online" pe server.
+
+    Dispecerul intră în verificare deși nu observă nimic: mort, evenimentele
+    se strâng în spool și nu mai pleacă, iar pentru server endpoint-ul e la fel
+    de orb. O pană de rețea NU ajunge aici — dispecerul rămâne viu în backoff.
+    """
+    if event_spool is None:
+        return MONITORING_SPOOL_UNAVAILABLE
+
+    if file_monitor is None:
+        return MONITORING_MONITOR_UNAVAILABLE
+
+    if not file_monitor.pipeline_alive():
+        return MONITORING_STOPPED
+
+    if event_dispatcher is None or not event_dispatcher.is_alive():
+        return MONITORING_STOPPED
+
+    return MONITORING_ACTIVE
+
+
+def _monitoring_not_wired() -> str:
+    """
+    Implicitul buclei de heartbeat pornite fără pipeline de fișiere.
+
+    Partea sigură, deliberat: o buclă care nu știe nimic despre monitor nu are
+    voie să afirme "active". Un implicit "active" ar fi exact minciuna pe care
+    câmpul există s-o oprească.
+    """
+    return MONITORING_MONITOR_UNAVAILABLE
+
+
+def build_heartbeat_payload(
+    config: Dict[str, Any], sequence: int, monitoring: str
+) -> Dict[str, Any]:
     """
     Construiește payload-ul unui heartbeat.
 
@@ -227,11 +280,14 @@ def build_heartbeat_payload(config: Dict[str, Any], sequence: int) -> Dict[str, 
     Incarnarea este citită strict (_require_agent_instance_id): un config fără
     ea oprește construcția payload-ului în loc să emită None. Motivul detaliat
     al acestei stricteți e documentat în _require_agent_instance_id.
+    monitoring nu are valoare implicită din același motiv: un implicit
+    "active" ar raporta supraveghere exact când ea lipsește (assess_monitoring).
     """
     return {
         "agent_instance_id": _require_agent_instance_id(config),
         "sequence": sequence,
         "agent_version": config.get("agent_version"),
+        "monitoring": monitoring,
     }
 
 
@@ -659,6 +715,7 @@ def heartbeat_loop(
     heartbeat_interval_seconds: float,
     stop_event: StopSignal,
     credentials: Optional[AgentCredentials] = None,
+    monitoring_state: Callable[[], str] = _monitoring_not_wired,
 ) -> None:
     """
     Rulează bucla principală a agentului cu exponential backoff și sleep responsiv.
@@ -714,10 +771,27 @@ def heartbeat_loop(
 
     auth_alarm = _build_auth_alarm("Heartbeat", config)
 
+    # Doar pentru log: o schimbare de stare se scrie o dată, nu la fiecare
+    # heartbeat. Serverul are propria evidență (agent_monitoring_changed).
+    last_monitoring: Optional[str] = None
+
     while not stop_event.is_set():
         try:
             heartbeat_sequence += 1
-            heartbeat_payload = build_heartbeat_payload(config, heartbeat_sequence)
+            monitoring = monitoring_state()
+            if monitoring != last_monitoring:
+                if monitoring == MONITORING_ACTIVE:
+                    logger.info("File monitoring state reported to server: %s.", monitoring)
+                else:
+                    logger.error(
+                        "File monitoring is NOT active (%s). Reporting it to the "
+                        "server with every heartbeat.",
+                        monitoring,
+                    )
+                last_monitoring = monitoring
+            heartbeat_payload = build_heartbeat_payload(
+                config, heartbeat_sequence, monitoring
+            )
             response = send_heartbeat(
                 server_url,
                 config["agent_id"],
@@ -905,7 +979,8 @@ def start_file_monitoring(
     except FileMonitorError as error:
         logger.error(
             "File monitoring could not start: %s. "
-            "Agent continues with heartbeat only.",
+            "Agent continues with heartbeat only and reports "
+            "monitoring=monitor_unavailable.",
             error,
         )
         return None
@@ -982,7 +1057,8 @@ def run_agent() -> None:
         except EventSpoolError as error:
             logger.error(
                 "Event spool could not be opened: %s. "
-                "File monitoring disabled; agent continues with heartbeat only.",
+                "File monitoring disabled; agent continues with heartbeat only "
+                "and reports monitoring=spool_unavailable.",
                 error,
             )
 
@@ -1029,6 +1105,11 @@ def run_agent() -> None:
                 heartbeat_interval_seconds,
                 stop_event,
                 credentials=credentials,
+                # Variabilele nu se mai schimbă după acest punct; lambda le
+                # citește doar ca să evalueze firele la fiecare heartbeat.
+                monitoring_state=lambda: assess_monitoring(
+                    event_spool, file_monitor, event_dispatcher
+                ),
             )
 
 

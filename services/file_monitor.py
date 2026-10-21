@@ -527,6 +527,24 @@ class FileMonitor:
 
         return True
 
+    def pipeline_alive(self) -> bool:
+        """
+        Toate cele trei etaje sunt vii: observer, releaser, hasher.
+
+        is_running() se uită doar la observer, dar un releaser sau un hasher
+        mort lasă observer-ul să observe în gol: fișierele intră în tracker sau
+        în coada de hashing și nu mai ies niciodată spre spool. Pentru server,
+        rezultatul e identic cu un observer mort — zero evenimente de fișier.
+        Folosit de heartbeat ca să raporteze supravegherea (agent.py::
+        assess_monitoring), la fiecare heartbeat, nu o singură dată la pornire.
+        """
+        return (
+            self._started
+            and self.observer.is_alive()
+            and self.releaser.is_alive()
+            and self.hasher.is_alive()
+        )
+
     def is_running(self) -> bool:
         """Returnează dacă observer-ul de monitorizare este activ."""
         return self._started and self.observer.is_alive()

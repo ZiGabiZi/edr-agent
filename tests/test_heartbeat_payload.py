@@ -34,7 +34,7 @@ from tests.wire_contract import declared_fields
 # Câmpurile pe care build_heartbeat_payload se angajează să le producă.
 # "agent_id" lipsește intenționat: îl adaugă transport.send_heartbeat().
 BUILDER_HEARTBEAT_FIELDS = frozenset(
-    {"agent_version", "sequence", "agent_instance_id"}
+    {"agent_version", "sequence", "agent_instance_id", "monitoring"}
 )
 
 # Câmpurile din răspuns pe care heartbeat_loop le citește efectiv. Sunt
@@ -59,7 +59,7 @@ class HeartbeatPayloadContractTests(unittest.TestCase):
     def test_payload_carries_instance_id_under_the_key_the_server_reads(self) -> None:
         config = _make_config()
 
-        payload = agent.build_heartbeat_payload(config, sequence=1)
+        payload = agent.build_heartbeat_payload(config, sequence=1, monitoring="active")
 
         self.assertIn("agent_instance_id", payload)
         self.assertEqual(
@@ -75,7 +75,7 @@ class HeartbeatPayloadContractTests(unittest.TestCase):
         valid, iar Pydantic îi pune None pe server fără nicio eroare. Egalitatea
         închide și direcția asta.
         """
-        payload = agent.build_heartbeat_payload(_make_config(), sequence=1)
+        payload = agent.build_heartbeat_payload(_make_config(), sequence=1, monitoring="active")
 
         self.assertEqual(
             set(payload),
@@ -101,7 +101,7 @@ class HeartbeatPayloadContractTests(unittest.TestCase):
         )
 
     def test_payload_carries_the_sequence_it_was_given(self) -> None:
-        payload = agent.build_heartbeat_payload(_make_config(), sequence=7)
+        payload = agent.build_heartbeat_payload(_make_config(), sequence=7, monitoring="active")
 
         self.assertEqual(payload["sequence"], 7)
 
@@ -357,14 +357,14 @@ class PayloadStrictnessTests(unittest.TestCase):
         del config["agent_instance_id"]
 
         with self.assertRaises(ValueError):
-            agent.build_heartbeat_payload(config, sequence=1)
+            agent.build_heartbeat_payload(config, sequence=1, monitoring="active")
 
     def test_heartbeat_builder_refuses_a_blank_incarnation(self) -> None:
         config = _make_config()
         config["agent_instance_id"] = "   "
 
         with self.assertRaises(ValueError):
-            agent.build_heartbeat_payload(config, sequence=1)
+            agent.build_heartbeat_payload(config, sequence=1, monitoring="active")
 
     def test_lifecycle_builders_refuse_a_config_without_incarnation(self) -> None:
         """

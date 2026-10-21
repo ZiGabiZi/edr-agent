@@ -79,6 +79,14 @@ canalului de control**, oricât ar crește parcul. Curba din §3.1 are o asimpto
 pe care nu o pune analiza, ci telemetria. Valoarea ei se estimează pe hârtie
 înainte de măsurătoare.
 
+**Câmpul `monitoring` (contract v10) ridică podeaua.** Fiecare heartbeat poartă
+starea supravegherii: `, "monitoring": "active"` adaugă **24 B** pe fir
+(serializarea implicită a agentului, cu spații), iar stările de eșec până la
+**37 B** (`monitor_unavailable`). La cadența de 10 s, adică 8 640 de
+heartbeat-uri pe zi, înseamnă circa **207 kB pe zi per endpoint** în stare
+normală. Se adună la estimarea podelei, nu se lasă în afara ei: e un cost al
+observației, nu al divulgării, și crește cu timpul, nu cu fișierele.
+
 ---
 
 ## 2. Numitorul: modelul always-upload
@@ -809,6 +817,29 @@ greșit, iar responsabilitatea e a celui care a publicat-o.
 - pentru afirmații despre rate: marginea superioară din §4.3
 - **amprenta instantaneului de reputație**, sursele consultate cu versiunile
   lor, și **brațul ablației** — rece sau semiînzestrat (§8.1)
+- **endpoint-urile care n-au fost supravegheate** pe toată durata rulării:
+  orice eveniment `agent_monitoring_changed` din rulare. Un endpoint orb
+  produce zero evenimente de fișier și arată exact ca unul liniștit, deci
+  într-o rulare cu mai multe endpoint-uri trage în jos curba din §3.1 fără ca
+  cifra să lase vreo urmă. Un astfel de endpoint se exclude din marginal sau se
+  declară lângă cifră. Evenimentul e emis de server la schimbarea câmpului
+  `monitoring` din heartbeat și e persistat cu eticheta rulării. Registrul de
+  agenți e volatil (§9.5), așa că starea curentă nu ajunge pentru o rulare deja
+  încheiată. Ambele se citesc prin `GET /api/agents/monitoring?run_id=…`, cu
+  secretul de operator. Rutele publice nu le arată (AUTH.md §6).
+
+  **Ce poate afirma câmpul: defecte, nu sabotaj.** `monitoring` e declarat de
+  agent despre el însuși. Un **defect** e o defecțiune fără intenție: spool-ul
+  nu se deschide, un director lipsește, un fir moare. Agentul e onest și o
+  raportează. **Sabotajul** e oprirea intenționată a supravegherii de către
+  cineva care controlează endpoint-ul. Acela poate opri pipeline-ul și lăsa
+  heartbeat-ul să trimită în continuare `active`. Deci un `active` nu dovedește
+  supraveghere. Arată doar că agentul nu a detectat la el niciun defect. O
+  rulare fără `agent_monitoring_changed` e curată de defecte, nu și de
+  sabotaj. Sabotajul se poate detecta doar printr-o verificare pe care agentul
+  n-o poate falsifica: de exemplu un fișier-momeală creat de server, al cărui
+  eveniment trebuie să apară într-o fereastră cunoscută. E direcție viitoare,
+  nu mecanism existent.
 
 **Din 1.4, prima jumătate a listei călătorește cu cifra.** Răspunsul rutei de
 metrică poartă pe prima poziție blocul `run`, cu eticheta, sursa ei, ora
