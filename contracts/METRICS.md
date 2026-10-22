@@ -822,7 +822,10 @@ greșit, iar responsabilitatea e a celui care a publicat-o.
   produce zero evenimente de fișier și arată exact ca unul liniștit, deci
   într-o rulare cu mai multe endpoint-uri trage în jos curba din §3.1 fără ca
   cifra să lase vreo urmă. Un astfel de endpoint se exclude din marginal sau se
-  declară lângă cifră. Evenimentul e emis de server la schimbarea câmpului
+  declară lângă cifră. Din contract v11 intră aici și endpoint-ul `partial`,
+  pornit cu doar o parte din directoarele configurate sau care a pierdut unul
+  în timpul rulării: produce evenimente, dar doar din o parte a zonei, deci
+  trage curba în jos la fel, doar mai greu de observat. Evenimentul e emis de server la schimbarea câmpului
   `monitoring` din heartbeat și e persistat cu eticheta rulării. Registrul de
   agenți e volatil (§9.5), așa că starea curentă nu ajunge pentru o rulare deja
   încheiată. Ambele se citesc prin `GET /api/agents/monitoring?run_id=…`, cu

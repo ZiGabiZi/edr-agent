@@ -371,11 +371,27 @@ class FileMonitor:
 
         self._started = False
 
+        # Directoarele configurate pe care start() nu le-a putut programa.
+        # Pornirea merge mai departe cât timp măcar unul e valid, deci fără
+        # lista asta heartbeat-ul ar raporta "active" peste o zonă supravegheată
+        # doar în parte (agent.py::assess_monitoring).
+        self.skipped_directories: list = []
+
+        # Emitter-ul watchdog al fiecărui director programat, reținut la
+        # programare. Când directorul e șters, watchdog oprește DOAR emitter-ul
+        # lui (read_directory_changes.py / inotify.py: self.stop()), iar
+        # observer-ul rămâne viu: pipeline_alive() nu vede nimic. Referința
+        # proprie scutește heartbeat-ul de iterat setul intern al observer-ului,
+        # pe care firul lui îl poate modifica între timp.
+        self._emitter_for_directory: dict = {}
+        self._reported_lost_directories: set = set()
+
     def start(self) -> None:
         """
         Pornește monitorizarea pentru toate directoarele valide configurate.
 
-        Directoarele inexistente sunt ignorate și raportate în log.
+        Directoarele inexistente sunt ignorate, raportate în log și reținute în
+        skipped_directories, de unde heartbeat-ul raportează "partial".
         Agentul nu creează automat directoare arbitrare din configurație.
 
         Firele auxiliare pornesc doar dacă observer-ul a pornit: fără
@@ -388,6 +404,9 @@ class FileMonitor:
             return
 
         valid_directories_count = 0
+        self.skipped_directories = []
+        self._emitter_for_directory = {}
+        self._reported_lost_directories = set()
 
         for directory in self.monitored_directories:
             directory_path = Path(directory)
@@ -397,6 +416,7 @@ class FileMonitor:
                     "Monitored directory does not exist and will be skipped: %s",
                     directory_path,
                 )
+                self.skipped_directories.append(str(directory_path))
                 continue
 
             if not directory_path.is_dir():
@@ -404,12 +424,21 @@ class FileMonitor:
                     "Configured monitored path is not a directory and will be skipped: %s",
                     directory_path,
                 )
+                self.skipped_directories.append(str(directory_path))
                 continue
 
-            self.observer.schedule(
+            watch = self.observer.schedule(
                 self.handler,
                 str(directory_path),
                 recursive=self.recursive_monitoring,
+            )
+            self._emitter_for_directory[str(directory_path)] = next(
+                (
+                    emitter
+                    for emitter in self.observer.emitters
+                    if emitter.watch == watch
+                ),
+                None,
             )
 
             valid_directories_count += 1
@@ -434,6 +463,15 @@ class FileMonitor:
             "File monitoring started successfully for %s directorie(s).",
             valid_directories_count,
         )
+
+        if self.skipped_directories:
+            self.logger.warning(
+                "File monitoring covers %s of %s configured directories. "
+                "Heartbeat reports monitoring=partial. Skipped: %s",
+                valid_directories_count,
+                len(self.monitored_directories),
+                ", ".join(self.skipped_directories),
+            )
 
     def stop(self) -> None:
         """
@@ -544,6 +582,54 @@ class FileMonitor:
             and self.releaser.is_alive()
             and self.hasher.is_alive()
         )
+
+    def lost_directories(self) -> list:
+        """
+        Directoarele programate la pornire care nu mai sunt supravegheate acum.
+
+        Două semne, verificate la fiecare apel:
+        - emitter-ul lor s-a oprit: watchdog face asta singur când directorul
+          supravegheat e șters;
+        - calea nu mai e un director: un director mutat sau redenumit își
+          păstrează emitter-ul viu pe Windows, dar acesta urmărește directorul
+          la noua lui locație, nu calea configurată.
+
+        Pierderea e definitivă până la repornire: un director recreat la
+        aceeași cale nu mai e urmărit de emitter-ul oprit (limita „director
+        creat mai târziu", declarată în contract). Un director mutat și
+        înlocuit cu altul la aceeași cale NU se vede aici.
+        """
+        lost = [
+            directory
+            for directory, emitter in self._emitter_for_directory.items()
+            if emitter is None
+            or not emitter.is_alive()
+            or not os.path.isdir(directory)
+        ]
+
+        for directory in lost:
+            if directory not in self._reported_lost_directories:
+                self._reported_lost_directories.add(directory)
+                self.logger.warning(
+                    "Monitored directory is no longer watched (deleted, moved "
+                    "or its watcher stopped): %s. Heartbeat reports "
+                    "monitoring=partial until the agent restarts.",
+                    directory,
+                )
+
+        return lost
+
+    def covers_all_directories(self) -> bool:
+        """
+        Fiecare director configurat a fost programat la pornire și e încă
+        supravegheat acum.
+
+        Partea de la pornire se fixează în start(): un director care apare mai
+        târziu nu intră sub observer, deci zona rămâne parțială până la
+        repornirea agentului (limită declarată în contracts/wire-contract.json,
+        heartbeat_request.notes). Partea de acum vine din lost_directories().
+        """
+        return not self.skipped_directories and not self.lost_directories()
 
     def is_running(self) -> bool:
         """Returnează dacă observer-ul de monitorizare este activ."""

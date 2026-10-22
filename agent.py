@@ -211,9 +211,12 @@ def build_shutdown_event_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# Vocabularul câmpului monitoring din heartbeat (contract v10). Orice valoare
-# în afară de MONITORING_ACTIVE înseamnă că endpoint-ul NU e supravegheat.
+# Vocabularul câmpului monitoring din heartbeat (contract v11). Orice valoare
+# în afară de MONITORING_ACTIVE înseamnă că endpoint-ul NU e supravegheat
+# complet. MONITORING_PARTIAL (v11): pipeline-ul merge, dar doar peste o parte
+# din directoarele configurate (lipsă la pornire sau pierdute în rulare).
 MONITORING_ACTIVE = "active"
+MONITORING_PARTIAL = "partial"
 MONITORING_SPOOL_UNAVAILABLE = "spool_unavailable"
 MONITORING_MONITOR_UNAVAILABLE = "monitor_unavailable"
 MONITORING_STOPPED = "stopped"
@@ -235,6 +238,9 @@ def assess_monitoring(
     Dispecerul intră în verificare deși nu observă nimic: mort, evenimentele
     se strâng în spool și nu mai pleacă, iar pentru server endpoint-ul e la fel
     de orb. O pană de rețea NU ajunge aici — dispecerul rămâne viu în backoff.
+
+    "partial" vine ultimul: un fir mort orbește toată zona, deci "stopped"
+    are prioritate peste un director lipsă.
     """
     if event_spool is None:
         return MONITORING_SPOOL_UNAVAILABLE
@@ -247,6 +253,9 @@ def assess_monitoring(
 
     if event_dispatcher is None or not event_dispatcher.is_alive():
         return MONITORING_STOPPED
+
+    if not file_monitor.covers_all_directories():
+        return MONITORING_PARTIAL
 
     return MONITORING_ACTIVE
 
