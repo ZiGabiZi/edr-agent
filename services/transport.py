@@ -6,6 +6,7 @@ import requests
 from requests import Response, Session
 from requests.exceptions import RequestException, Timeout, ConnectionError as RequestsConnectionError
 
+from services.incarnation import process_instance_id
 from services.wire_ledger import (
     CHANNEL_CONTROL,
     CHANNEL_ENROLLMENT,
@@ -48,9 +49,11 @@ JSON_CONTENT_TYPE = "application/json"
 WIRE_ATTEMPTED_HEADER = "X-Agent-Wire-Attempted-Bytes"
 WIRE_DELIVERED_HEADER = "X-Agent-Wire-Delivered-Bytes"
 
-# Încarnarea care raportează cifrele de mai sus.
+# Încarnarea care raportează cifrele de mai sus, adică a procesului care trimite.
+# Nu e neapărat cea din corp: un eveniment retransmis din spool după o repornire
+# poartă în corp încarnarea care l-a creat. Vezi build_incarnation_header().
 #
-# De ce e nevoie de ea pe antet, când călătorește deja în corp:
+# De ce e nevoie de ea pe antet, când corpul poartă oricum un agent_instance_id:
 #     Serverul contabilizează în middleware, adică înainte de rutare, ca să nu
 #     piardă cererile respinse cu 401 — exact traficul cel mai interesant. Un
 #     middleware nu poate însă citi corpul fără să consume fluxul pe care îl
@@ -280,42 +283,49 @@ def build_wire_headers(snapshot: WireLedgerSnapshot) -> Dict[str, str]:
 
 
 def build_incarnation_header(
-    payload: Dict[str, Any],
     agent_instance_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """
-    Antetul cu încarnarea, din payload sau, unde corpul n-are voie s-o poarte,
-    din valoarea dată explicit.
+    Antetul cu încarnarea procesului care trimite (METRICS.md §7.1).
 
-    De ce implicit din payload:
-        `agent_instance_id` e deja în corpul evenimentelor, al heartbeat-urilor
-        și al evenimentelor de ciclu de viață. Citindu-l de acolo, antetul și
-        corpul nu pot ajunge niciodată să spună lucruri diferite despre aceeași
-        cerere — ceea ce un parametru pasat de patru apelanți chiar ar putea.
+    De ce procesul și nu payload-ul (edr-agent#21):
+        Antetul trebuie să numească proprietarul contoarelor de lângă el, iar
+        contoarele sunt ale registrului procesului curent — post_request() le ia
+        din wire_ledger.snapshot(). Prima formă citea încarnarea din payload, ca
+        antetul și corpul să nu se poată contrazice. Pentru un eveniment rămas
+        în spool de la o pornire anterioară regula aceea dădea încarnarea
+        greșită: corpul păstrează încarnarea care l-a creat, dar octeții
+        retransmiterii sunt numărați de încarnarea care îl trimite. Serverul
+        punea astfel octeții la o încarnare și raportul la alta, iar
+        reconcilierea arăta un below_lower_bound fals exact după repornirile cu
+        spool nevid.
 
-    De ce există totuși parametrul, doar pentru înregistrare:
+    Antetul și corpul POT deci diferi, la retransmiterea din spool:
+        Diferența nu e o contradicție, ci informație. Corpul spune cine a
+        observat evenimentul, antetul cine l-a pus pe fir. Serverul
+        contabilizează după antet și stochează evenimentul după corp, iar
+        niciuna dintre cele două nu o corectează pe cealaltă. De aceea funcția
+        nici nu mai primește payload-ul: corpul nu e o sursă pentru antet, iar
+        post_request() nu-l modifică.
+
+    Înregistrarea nu mai e un caz aparte:
         contracts/wire-contract.json INTERZICE `agent_instance_id` în corpul
-        înregistrării, și nu din curățenie. La repornire, reînregistrarea rulează
-        înaintea primului heartbeat, iar register_agent() de pe server face
-        update() peste înregistrarea existentă: o încarnare venită prin corpul
-        înregistrării ar suprascrie baseline-ul înainte ca heartbeat-ul să îl
-        poată compara, iar restart_detected n-ar mai fi True niciodată.
+        înregistrării, pentru că ar suprascrie baseline-ul de repornire înainte
+        ca heartbeat-ul să îl compare. Interdicția e pe CORP, nu pe cerere:
+        antetul nu trece prin schema serverului și nu ajunge în agents_store.
+        Încarnarea pleacă și acolo pe antet, din aceeași sursă ca la orice altă
+        cerere.
 
-        Interdicția e pe CORP, nu pe cerere. Antetul nu trece prin schema
-        serverului și nu ajunge în agents_store, deci nu atinge baseline-ul —
-        e citit de middleware-ul de contabilizare și atât. Aici cele două surse
-        nu se pot contrazice, pentru că în corp nu există nimic cu care să se
-        contrazică.
+    De ce antetul e mereu prezent:
+        Încarnarea procesului există de la import, deci nu mai e nimic de omis.
+        Octeții rămân neatribuibili doar la prima înrolare, pentru că lipsește
+        încă o cheie de agent (METRICS.md §7.1), nu pentru că lipsește antetul.
 
-    Când lipsesc amândouă, antetul se OMITE, nu se trimite gol:
-        Un antet gol ar arăta ca o valoare prezentă și ar strica o cheie de
-        contabilizare pe server; unul absent spune adevărul, iar serverul are
-        pentru asta o găleată proprie de octeți neatribuibili.
+    `agent_instance_id` e doar o suprascriere, pentru teste. Un șir gol contează
+    ca absent și lasă loc încarnării procesului, ca un antet gol să nu poată
+    strica o cheie de contabilizare pe server.
     """
-    instance_id = agent_instance_id or payload.get("agent_instance_id")
-
-    if not instance_id:
-        return {}
+    instance_id = agent_instance_id or process_instance_id()
 
     return {WIRE_INSTANCE_HEADER: str(instance_id)}
 
@@ -457,8 +467,10 @@ def post_request(
     `ledger` există doar pentru teste: implicit se folosește registrul
     încarnării, cel de la nivel de modul în services/wire_ledger.py.
 
-    `agent_instance_id` se dă explicit doar acolo unde corpul n-are voie să
-    poarte încarnarea — adică la înregistrare. Vezi build_incarnation_header().
+    `agent_instance_id` există tot doar pentru teste: suprascrie încarnarea
+    procesului pe antet. Implicit antetul poartă încarnarea procesului care
+    trimite, nu pe cea din payload, iar payload-ul pleacă neschimbat. Vezi
+    build_incarnation_header().
     """
     url = build_url(server_url, endpoint)
     client = session or requests
@@ -493,7 +505,7 @@ def post_request(
         # heartbeat).
         request_headers = build_json_headers(headers)
         request_headers.update(build_wire_headers(wire_ledger.snapshot()))
-        request_headers.update(build_incarnation_header(payload, agent_instance_id))
+        request_headers.update(build_incarnation_header(agent_instance_id))
 
         # Momentul „a părăsit endpoint-ul", din METRICS.md §1.1. Se numără
         # înainte de trimitere și nu se scade niciodată: dacă cererea moare
@@ -554,6 +566,9 @@ def register_agent(
     autentificare pornită refuză cu 401 o înregistrare fără niciuna. Valoarea
     implicită None există ca modulul să rămână utilizabil în testele care nu au
     treabă cu autentificarea.
+
+    `agent_instance_id` e suprascrierea din post_request(), tot doar pentru
+    teste. Agentul nu-l dă: încarnarea pleacă pe antet din procesul curent.
     """
     return post_request(
         server_url,

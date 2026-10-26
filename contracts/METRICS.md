@@ -459,7 +459,7 @@ logică prin care contractul de fir e testat, nu presupus.
 |---|---|
 | `X-Agent-Wire-Attempted-Bytes` | octeți predați transportului de la începutul încarnării |
 | `X-Agent-Wire-Delivered-Bytes` | octeți pentru care a venit orice răspuns HTTP |
-| `X-Agent-Instance-Id` | încarnarea căreia îi aparțin cifrele de mai sus |
+| `X-Agent-Instance-Id` | încarnarea procesului care trimite, căreia îi aparțin cifrele de mai sus |
 
 Primele două **exclud cererea în care sunt trimise**. Ca să declare dimensiunea
 cererii curente, agentul ar trebui să pună acea dimensiune într-un antet al
@@ -484,8 +484,23 @@ fluxul așteptat de ruta de după el, deci `agent_instance_id` trebuie să exist
 și în afara corpului. Fără el, contoarele care repornesc de la zero la fiecare
 pornire a agentului ar arăta ca direcția gravă din §7.2, la fiecare restart.
 
-Agentul citește valoarea din payload-ul care o poartă oricum, ca antetul și
-corpul să nu poată spune lucruri diferite.
+Valoarea antetului e **încarnarea procesului care trimite**, nu cea din corp.
+Cele două coincid pentru orice mesaj produs de încarnarea curentă, dar nu și
+pentru un eveniment retransmis din spool după o repornire: corpul lui păstrează
+`agent_instance_id` al încarnării care l-a **creat**, în timp ce octeții
+retransmiterii sunt numărați de registrul încarnării care îl **trimite**.
+Antetul trebuie să numească proprietarul contoarelor. Altfel serverul pune
+octeții la o încarnare și raportul la alta, iar reconcilierea arată un
+`below_lower_bound` fals exact după repornirile cu spool nevid (edr-agent#21).
+
+Prima formă a contractului cerea citirea din payload, ca antetul și corpul să
+nu se poată contrazice. Pentru evenimentele din spool, regula aceea dădea
+antetului încarnarea greșită.
+
+Diferența antet ≠ corp nu e deci o contradicție, ci informație: corpul spune
+cine a observat evenimentul, antetul cine l-a pus pe fir. Serverul
+contabilizează după antet și stochează evenimentul după corp, iar niciuna
+dintre cele două nu o corectează pe cealaltă.
 
 **Excepția e înregistrarea**, iar ea merită citită cu atenție, pentru că arată
 de ce antetul nu e doar o comoditate. `wire-contract.json` **interzice**
@@ -497,9 +512,8 @@ n-ar mai fi True niciodată.
 
 Interdicția e însă pe **corp**, nu pe cerere. Antetul nu trece prin schema
 serverului, nu ajunge în `agents_store` și nu atinge baseline-ul; e citit doar
-de contabilizare. Deci încarnarea pleacă și la înregistrare, pe antet, iar
-agentul o primește ca parametru explicit — singurul loc unde sursa antetului nu
-e payload-ul.
+de contabilizare. Deci încarnarea pleacă și la înregistrare, pe antet, din
+aceeași sursă ca la orice altă cerere: încarnarea procesului.
 
 **Ce rămâne neatribuibil, și de ce e acceptabil.** La *prima* înrolare a unei
 mașini nu există încă o cheie de agent: autentificarea se face cu secretul de

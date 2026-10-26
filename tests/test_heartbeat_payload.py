@@ -27,6 +27,7 @@ from contextlib import contextmanager, ExitStack
 from unittest.mock import patch
 
 import agent
+from services.incarnation import process_instance_id
 from services.transport import TransportError, AgentNotRegisteredError
 from tests.wire_contract import declared_fields
 
@@ -347,6 +348,16 @@ class IncarnationOwnershipTests(unittest.TestCase):
 
         self.assertNotEqual(instance_id, "fixat-in-config-json")
         self.assertEqual(config["agent_instance_id"], instance_id)
+
+    def test_the_config_and_the_transport_share_one_incarnation(self) -> None:
+        """
+        Corpurile iau incarnarea din config, antetul de contabilizare o ia din
+        services/incarnation.py. Dacă cele două ar putea diverge pentru mesajele
+        încarnării curente, serverul ar vedea o încarnare care n-a trimis nimic.
+        """
+        instance_id = agent.ensure_agent_instance_id({"agent_id": "agent-test"})
+
+        self.assertEqual(instance_id, process_instance_id())
 
 
 class PayloadStrictnessTests(unittest.TestCase):

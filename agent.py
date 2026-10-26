@@ -17,6 +17,7 @@ from services.auth_alarm import (
 from services.event_dispatcher import EventDispatcher
 from services.event_spool import EventSpool, EventSpoolError
 from services.file_monitor import FileMonitor, FileMonitorError
+from services.incarnation import process_instance_id
 from services.backoff import HeartbeatBackoffController
 from services.config_loader import ConfigError, load_config
 from services.stop_signal import StopSignal
@@ -96,14 +97,16 @@ def configure_logging(
 _STARTUP_BASE_DELAY_SECONDS: float = 5.0
 _STARTUP_MAX_DELAY_SECONDS: float = 60.0
 _STARTUP_WARN_AFTER_RETRIES: int = 15
-_PROCESS_INSTANCE_ID: str = str(uuid4())
 
 def ensure_agent_instance_id(config: Dict[str, Any]) -> str:
     """
     Fixează în config incarnarea rulării curente și o returnează.
 
-    Această funcție este singurul loc din agent care stabilește agent_instance_id.
-    Toți builderii de payload doar *citesc* valoarea, niciodată nu o produc.
+    Incarnarea e stabilită într-un singur loc, services/incarnation.py. De acolo
+    o citesc atât funcția asta, care o pune în config pentru builderii de
+    payload, cât și transportul, care o pune pe antetul de contabilizare. Toți
+    builderii de payload doar *citesc* valoarea din config, niciodată nu o
+    produc.
 
     Două proprietăți sunt obligatorii, iar ambele derivă din felul în care
     serverul interpretează câmpul:
@@ -117,9 +120,10 @@ def ensure_agent_instance_id(config: Dict[str, Any]) -> str:
         serverul n-ar mai observa nicio schimbare, iar detecția de repornire ar
         fi dezactivată permanent — exact eșecul tăcut pe care îl prevenim aici.
     """
+    instance_id = process_instance_id()
     stale_instance_id = config.get("agent_instance_id")
 
-    if stale_instance_id is not None and stale_instance_id != _PROCESS_INSTANCE_ID:
+    if stale_instance_id is not None and stale_instance_id != instance_id:
         logger.warning(
             "Ignoring agent_instance_id=%r found in configuration: the incarnation "
             "identifies the running process and is generated at startup. A fixed "
@@ -128,8 +132,8 @@ def ensure_agent_instance_id(config: Dict[str, Any]) -> str:
             stale_instance_id,
         )
 
-    config["agent_instance_id"] = _PROCESS_INSTANCE_ID
-    return _PROCESS_INSTANCE_ID
+    config["agent_instance_id"] = instance_id
+    return instance_id
 
 
 def _require_agent_instance_id(config: Dict[str, Any]) -> str:
@@ -590,22 +594,13 @@ def register_agent_with_retry(
                 enrollment_secret=(
                     credentials.enrollment_secret if credentials else None
                 ),
-                # Încarnarea pleacă pe ANTET, nu în corp. Contractul interzice
-                # câmpul în payload-ul de înregistrare, pentru că ar suprascrie
-                # baseline-ul de repornire înainte ca heartbeat-ul să-l compare
-                # (vezi wire-contract.json::agent_register_request.notes).
-                # Antetul nu trece prin schema serverului și nu ajunge în
-                # agents_store; e citit doar de contabilizarea de octeți, care
-                # altfel n-ar putea atribui nimănui octeții de înrolare.
-                #
-                # Citire permisivă, nu _require_agent_instance_id(): acolo
-                # stricteța apără o invariantă — un payload fără încarnare
-                # omoară tăcut detecția de repornire, deci merită să oprească
-                # construcția. Aici e vorba de un antet de contabilizare, iar o
-                # metrică nu are voie să împiedice un endpoint să se înregistreze.
-                # Fără el, octeții de înrolare rămân neatribuiți — vizibil, în
-                # găleata serverului, nu pierdut.
-                agent_instance_id=config.get("agent_instance_id"),
+                # Încarnarea nu se mai dă aici. Pleacă pe ANTET, nu în corp,
+                # pentru că contractul interzice câmpul în payload-ul de
+                # înregistrare: ar suprascrie baseline-ul de repornire înainte
+                # ca heartbeat-ul să-l compare (vezi
+                # wire-contract.json::agent_register_request.notes). Antetul îl
+                # pune transportul, din încarnarea procesului, la fel ca la
+                # orice altă cerere. Vezi build_incarnation_header().
             )
             # Răspunsul conține cheia în clar exact o dată în viața ei. Se
             # loghează doar cheile dicționarului, nu conținutul: un log rotativ

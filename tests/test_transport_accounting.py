@@ -15,6 +15,7 @@ in sir apare ca si cum n-ar divulga nimic. Testul acela e singurul lucru care
 sta intre cifra publicata si eroarea aceea.
 """
 
+import json
 import pathlib
 import unittest
 from unittest.mock import patch
@@ -23,6 +24,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import Timeout
 
 import services.transport as transport
+from services.incarnation import process_instance_id
 from services.transport import (
     WIRE_ATTEMPTED_HEADER,
     WIRE_DELIVERED_HEADER,
@@ -390,19 +392,50 @@ class WireHeadersTests(unittest.TestCase):
         post_request(
             "http://server",
             "/api/events",
-            dict(PAYLOAD, agent_instance_id="incarnare-7"),
+            dict(PAYLOAD, agent_instance_id=process_instance_id()),
             channel=CHANNEL_EVENTS,
             session=as_session(session),
             ledger=WireLedger(),
         )
 
-        self.assertEqual(session.calls[0]["headers"][WIRE_INSTANCE_HEADER], "incarnare-7")
+        self.assertEqual(
+            session.calls[0]["headers"][WIRE_INSTANCE_HEADER], process_instance_id()
+        )
 
-    def test_a_payload_without_an_incarnation_omits_the_header(self) -> None:
-        # Cazul real e inregistrarea, singurul payload fara agent_instance_id.
-        # Un antet gol ar arata ca o valoare prezenta si ar strica o cheie de
-        # contabilizare pe server; unul absent spune adevarul, iar serverul are
-        # pentru asta o galeata de octeti neatribuibili.
+    def test_a_spooled_event_from_an_earlier_run_leaves_with_this_process(
+        self,
+    ) -> None:
+        # Cazul din edr-agent#21. Evenimentul a fost creat de o pornire
+        # anterioara, a stat in spool si pleaca acum. Octetii lui ii numara
+        # registrul procesului curent, deci antetul trebuie sa numeasca procesul
+        # curent. Cu incarnarea din corp, serverul punea octetii la o incarnare
+        # si raportul la alta, iar reconcilierea arata un below_lower_bound fals.
+        session = RecordingSession()
+        spooled = dict(PAYLOAD, agent_instance_id="incarnare-veche")
+        sent_body = serialize_payload(spooled)
+
+        post_request(
+            "http://server",
+            "/api/events",
+            spooled,
+            channel=CHANNEL_EVENTS,
+            session=as_session(session),
+            ledger=WireLedger(),
+        )
+
+        call = session.calls[0]
+        self.assertNotEqual(process_instance_id(), "incarnare-veche")
+        self.assertEqual(call["headers"][WIRE_INSTANCE_HEADER], process_instance_id())
+        # Corpul pleaca neschimbat, octet cu octet: el spune cine a observat
+        # evenimentul, iar diferenta fata de antet e informatie, nu eroare.
+        self.assertEqual(call["data"], sent_body)
+        self.assertEqual(json.loads(call["data"])["agent_instance_id"], "incarnare-veche")
+        self.assertEqual(spooled["agent_instance_id"], "incarnare-veche")
+
+    def test_a_registration_carries_the_header_without_any_override(self) -> None:
+        # Inregistrarea e singurul payload fara agent_instance_id in corp.
+        # Inainte antetul se omitea aici, daca nu venea pasat explicit. Acum
+        # vine din proces, ca la orice alta cerere, deci e mereu prezent.
         session = RecordingSession()
 
         post_request(
@@ -414,14 +447,17 @@ class WireHeadersTests(unittest.TestCase):
             ledger=WireLedger(),
         )
 
-        self.assertNotIn(WIRE_INSTANCE_HEADER, session.calls[0]["headers"])
+        call = session.calls[0]
+        self.assertEqual(call["headers"][WIRE_INSTANCE_HEADER], process_instance_id())
+        # Garda care conteaza: incarnarea de pe antet nu are voie sa ajunga in
+        # corp. Daca ar ajunge, detectia de repornire moare tacut.
+        self.assertNotIn(b"agent_instance_id", call["data"])
 
-    def test_the_incarnation_can_come_from_outside_the_payload(self) -> None:
-        # Cazul inregistrarii. Contractul interzice agent_instance_id in CORPUL
-        # inregistrarii, pentru ca ar suprascrie baseline-ul de repornire
-        # inainte ca heartbeat-ul sa-l compare. Interdictia e pe corp, nu pe
-        # cerere: antetul nu trece prin schema serverului si nu ajunge in
-        # agents_store.
+    def test_an_override_never_reaches_the_body(self) -> None:
+        # Contractul interzice agent_instance_id in CORPUL inregistrarii,
+        # pentru ca ar suprascrie baseline-ul de repornire inainte ca
+        # heartbeat-ul sa-l compare. Interdictia e pe corp, nu pe cerere:
+        # antetul nu trece prin schema serverului si nu ajunge in agents_store.
         session = RecordingSession()
         body = {"agent_id": "agent-1", "hostname": "masina"}
 
@@ -437,13 +473,12 @@ class WireHeadersTests(unittest.TestCase):
 
         call = session.calls[0]
         assert call["headers"][WIRE_INSTANCE_HEADER] == "incarnare-9"
-        # Garda care conteaza: valoarea data pe langa payload nu are voie sa
-        # ajunga in corp. Daca ar ajunge, detectia de repornire moare tacut.
         self.assertNotIn(b"agent_instance_id", call["data"])
 
-    def test_an_explicit_incarnation_wins_over_the_payload(self) -> None:
-        # Nu se intampla in practica — cele doua surse nu coexista — dar regula
-        # trebuie sa fie scrisa undeva, altfel urmatorul cititor o ghiceste.
+    def test_an_explicit_incarnation_wins_over_the_process(self) -> None:
+        # Suprascrierea exista doar pentru teste, dar regula trebuie sa fie
+        # scrisa undeva, altfel urmatorul cititor o ghiceste. Corpul nu conteaza
+        # pentru antet, nici cand poarta alta valoare.
         session = RecordingSession()
 
         post_request(
@@ -460,7 +495,10 @@ class WireHeadersTests(unittest.TestCase):
             session.calls[0]["headers"][WIRE_INSTANCE_HEADER], "explicita"
         )
 
-    def test_an_empty_incarnation_is_treated_as_absent(self) -> None:
+    def test_an_empty_override_falls_back_to_the_process(self) -> None:
+        # Un antet gol ar arata ca o valoare prezenta si ar strica o cheie de
+        # contabilizare pe server. Nici un sir gol in corp nu mai conteaza:
+        # corpul nu e o sursa pentru antet.
         session = RecordingSession()
 
         post_request(
@@ -470,9 +508,12 @@ class WireHeadersTests(unittest.TestCase):
             channel=CHANNEL_EVENTS,
             session=as_session(session),
             ledger=WireLedger(),
+            agent_instance_id="",
         )
 
-        self.assertNotIn(WIRE_INSTANCE_HEADER, session.calls[0]["headers"])
+        self.assertEqual(
+            session.calls[0]["headers"][WIRE_INSTANCE_HEADER], process_instance_id()
+        )
 
     def test_the_headers_ride_along_with_authentication(self) -> None:
         session = RecordingSession()
