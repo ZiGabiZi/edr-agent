@@ -825,7 +825,11 @@ greșit, iar responsabilitatea e a celui care a publicat-o.
   declară lângă cifră. Din contract v11 intră aici și endpoint-ul `partial`,
   pornit cu doar o parte din directoarele configurate sau care a pierdut unul
   în timpul rulării: produce evenimente, dar doar din o parte a zonei, deci
-  trage curba în jos la fel, doar mai greu de observat. Evenimentul e emis de server la schimbarea câmpului
+  trage curba în jos la fel, doar mai greu de observat. Starea nu ține până la
+  repornire: agentul pune directorul înapoi sub observer când reapare, deci
+  perechea `-> partial` / `partial -> active` din aceeași incarnare
+  delimitează fereastra neacoperită, iar endpoint-ul se exclude sau se declară
+  pentru acea fereastră. Evenimentul e emis de server la schimbarea câmpului
   `monitoring` din heartbeat și e persistat cu eticheta rulării. Registrul de
   agenți e volatil (§9.5), așa că starea curentă nu ajunge pentru o rulare deja
   încheiată. Ambele se citesc prin `GET /api/agents/monitoring?run_id=…`, cu

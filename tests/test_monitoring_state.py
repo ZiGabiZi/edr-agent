@@ -10,6 +10,9 @@ la fiecare heartbeat.
 v11 închide al patrulea caz: din mai multe directoare configurate doar unele
 există. FileMonitor pornea, iar agentul raporta "active" peste o zonă
 supravegheată doar în parte.
+
+Recuperarea închide drumul înapoi: un director care apare sau reapare după
+pornire intră sub observer, iar starea revine la "active" fără repornire.
 """
 
 import logging
@@ -143,14 +146,14 @@ class DirectoryCoverageTests(unittest.TestCase):
         monitor = self._start([self.directory.name])
 
         self.assertTrue(monitor.covers_all_directories())
-        self.assertEqual(monitor.skipped_directories, [])
+        self.assertEqual(monitor.unwatched_directories, [])
 
     def test_a_missing_directory_is_recorded_and_the_monitor_still_starts(self) -> None:
         monitor = self._start([self.directory.name, self.missing])
 
         self.assertTrue(monitor.pipeline_alive())
         self.assertFalse(monitor.covers_all_directories())
-        self.assertEqual(monitor.skipped_directories, [self.missing])
+        self.assertEqual(monitor.unwatched_directories, [self.missing])
 
     def test_a_file_in_place_of_a_directory_is_recorded(self) -> None:
         not_a_directory = os.path.join(self.directory.name, "file.txt")
@@ -159,7 +162,7 @@ class DirectoryCoverageTests(unittest.TestCase):
 
         monitor = self._start([self.directory.name, not_a_directory])
 
-        self.assertEqual(monitor.skipped_directories, [not_a_directory])
+        self.assertEqual(monitor.unwatched_directories, [not_a_directory])
 
     def test_the_real_monitor_reports_partial_on_the_heartbeat(self) -> None:
         """Cazul găsit la 21 octombrie 2026, cap la cap pe obiectul real."""
@@ -234,15 +237,6 @@ class LostDirectoryTests(unittest.TestCase):
         emitter.join(timeout=5)
         self.assertFalse(emitter.is_alive())
 
-    def test_a_directory_recreated_at_the_same_path_stays_lost(self) -> None:
-        """Emitter-ul oprit nu revine: zona rămâne parțială până la repornire."""
-        shutil.rmtree(self.doomed)
-        self._wait_until_lost(self.doomed)
-
-        os.mkdir(self.doomed)
-
-        self.assertIn(self.doomed, self.monitor.lost_directories())
-
     def test_moving_a_watched_directory_away_turns_the_heartbeat_partial(self) -> None:
         os.rename(self.doomed, os.path.join(self.root.name, "moved"))
 
@@ -260,6 +254,226 @@ class LostDirectoryTests(unittest.TestCase):
                 self.monitor.lost_directories()
 
         warning.assert_not_called()
+
+
+def _wait_for(condition, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return condition()
+
+
+class DirectoryRecoveryTests(unittest.TestCase):
+    """
+    Pe FileMonitor real și pe disc real: directorul apare sau reapare DUPĂ
+    pornire, iar firul de recuperare îl pune din nou sub observer.
+
+    Înainte, zona rămânea parțială până la repornirea agentului: start()
+    programa o singură dată, iar emitter-ul oprit la ștergere nu revenea.
+
+    Testele cu fir folosesc o cadență scurtă, ca să dovedească drumul real;
+    cele cu cadență lungă cheamă recover_directories_once() direct, ca o
+    trecere să fie exact una.
+    """
+
+    def setUp(self) -> None:
+        self.root = tempfile.TemporaryDirectory()
+        self.kept = os.path.join(self.root.name, "kept")
+        self.doomed = os.path.join(self.root.name, "doomed")
+        self.late = os.path.join(self.root.name, "late")
+        os.mkdir(self.kept)
+        os.mkdir(self.doomed)
+        self.events: list = []
+        self.monitor = None
+
+    def tearDown(self) -> None:
+        if self.monitor is not None:
+            self.monitor.stop()
+            self.monitor.join(timeout=5)
+        self.root.cleanup()
+
+    def _start(self, directories, recovery_poll_seconds: float) -> FileMonitor:
+        self.monitor = FileMonitor(
+            agent_id="agent-test",
+            agent_instance_id="11111111-2222-3333-4444-555555555555",
+            monitored_directories=directories,
+            recursive_monitoring=False,
+            event_callback=self.events.append,
+            logger=_SILENT,
+            quiet_seconds=0.1,
+            max_wait_seconds=1.0,
+            release_poll_seconds=0.05,
+            recovery_poll_seconds=recovery_poll_seconds,
+        )
+        self.monitor.start()
+        return self.monitor
+
+    def _wait_for_dead_emitter_after_rmtree(self, monitor: FileMonitor):
+        emitter = monitor._emitter_for_directory[self.doomed]
+        shutil.rmtree(self.doomed)
+        emitter.join(timeout=5)
+        self.assertFalse(emitter.is_alive())
+        return emitter
+
+    def _assert_files_are_reported_from(self, directory: str) -> None:
+        """Dovada că directorul e chiar supravegheat, nu doar contabilizat."""
+        file_path = os.path.join(directory, "proba.txt")
+        with open(file_path, "w", encoding="utf-8") as handle:
+            handle.write("continut de proba")
+
+        reported = _wait_for(
+            lambda: any(
+                os.path.normcase(event.get("file_path", ""))
+                == os.path.normcase(os.path.abspath(file_path))
+                for event in list(self.events)
+            )
+        )
+        self.assertTrue(reported, f"no file event from {directory}")
+
+    def test_a_directory_created_after_start_turns_the_heartbeat_active(self) -> None:
+        monitor = self._start([self.kept, self.late], recovery_poll_seconds=0.05)
+        self.assertEqual(_assess(object(), monitor, _Alive()), "partial")
+
+        os.mkdir(self.late)
+
+        self.assertTrue(_wait_for(monitor.covers_all_directories))
+        self.assertEqual(monitor.unwatched_directories, [])
+        self.assertEqual(_assess(object(), monitor, _Alive()), "active")
+        self._assert_files_are_reported_from(self.late)
+
+    def test_a_deleted_and_recreated_directory_turns_the_heartbeat_active(self) -> None:
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=0.05)
+
+        shutil.rmtree(self.doomed)
+        self.assertTrue(_wait_for(lambda: not monitor.covers_all_directories()))
+        self.assertTrue(_wait_for(lambda: self.doomed in monitor.unwatched_directories))
+
+        os.mkdir(self.doomed)
+
+        self.assertTrue(_wait_for(monitor.covers_all_directories))
+        self.assertEqual(_assess(object(), monitor, _Alive()), "active")
+        self._assert_files_are_reported_from(self.doomed)
+
+    def test_deletion_and_recreation_between_two_passes_recover_in_one(self) -> None:
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        old_emitter = self._wait_for_dead_emitter_after_rmtree(monitor)
+
+        os.mkdir(self.doomed)
+
+        self.assertEqual(monitor.recover_directories_once(), [self.doomed])
+        new_emitter = monitor._emitter_for_directory[self.doomed]
+        self.assertIsNot(new_emitter, old_emitter)
+        self.assertTrue(new_emitter.is_alive())
+
+    def test_a_loss_shorter_than_a_heartbeat_still_reaches_the_server(self) -> None:
+        """
+        Șters și recreat, apoi recuperat, fără ca vreun heartbeat să-l vadă
+        lipsă. Fără zăvor, heartbeat-ul următor ar spune "active", iar
+        pierderea n-ar lăsa nicio urmă pe server. Raportată o dată, apoi
+        starea revine.
+        """
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        self._wait_for_dead_emitter_after_rmtree(monitor)
+        os.mkdir(self.doomed)
+        monitor.recover_directories_once()
+
+        self.assertEqual(_assess(object(), monitor, _Alive()), "partial")
+        self.assertEqual(_assess(object(), monitor, _Alive()), "active")
+
+    def test_a_directory_moved_and_replaced_between_two_passes_is_lost(self) -> None:
+        """
+        Emitter-ul vechi e viu (urmărește directorul mutat), iar la cale e tot
+        un director. Doar identitatea arată că nu mai e cel programat.
+        """
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        old_emitter = monitor._emitter_for_directory[self.doomed]
+
+        os.rename(self.doomed, os.path.join(self.root.name, "moved"))
+        os.mkdir(self.doomed)
+
+        self.assertTrue(old_emitter.is_alive())
+        self.assertEqual(monitor.lost_directories(), [self.doomed])
+
+        self.assertEqual(monitor.recover_directories_once(), [self.doomed])
+        old_emitter.join(timeout=5)
+        self.assertFalse(old_emitter.is_alive())
+        self.assertEqual(_assess(object(), monitor, _Alive()), "partial")
+        self.assertEqual(_assess(object(), monitor, _Alive()), "active")
+        self._assert_files_are_reported_from(self.doomed)
+
+    def test_a_directory_still_missing_stays_unwatched(self) -> None:
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        self._wait_for_dead_emitter_after_rmtree(monitor)
+
+        self.assertEqual(monitor.recover_directories_once(), [])
+        self.assertEqual(monitor.unwatched_directories, [self.doomed])
+        self.assertNotIn(self.doomed, monitor._emitter_for_directory)
+        self.assertEqual(_assess(object(), monitor, _Alive()), "partial")
+
+    @unittest.skipUnless(os.name == "nt", "handle-ul de director e specific Windows")
+    def test_a_dead_emitter_handle_is_not_closed_a_second_time(self) -> None:
+        """
+        Fixează presupunerea despre watchdog 6.0.0 din _unschedule_directory():
+        emitter-ul oprit la ștergere își păstrează handle-ul deja închis, iar
+        unschedule() l-ar închide din nou — posibil peste alt obiect.
+        """
+        from watchdog.observers import read_directory_changes
+
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        old_emitter = self._wait_for_dead_emitter_after_rmtree(monitor)
+        self.assertIsNotNone(old_emitter._whandle)
+
+        with patch.object(read_directory_changes, "close_directory_handle") as close:
+            monitor.recover_directories_once()
+
+        close.assert_not_called()
+        self.assertIsNone(old_emitter._whandle)
+
+    def test_a_moved_directory_is_released_and_rewatched_when_replaced(self) -> None:
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        old_emitter = monitor._emitter_for_directory[self.doomed]
+
+        os.rename(self.doomed, os.path.join(self.root.name, "moved"))
+        monitor.recover_directories_once()
+
+        # Emitter-ul urmărea directorul la noua lui locație, în afara zonei.
+        old_emitter.join(timeout=5)
+        self.assertFalse(old_emitter.is_alive())
+        self.assertEqual(monitor.unwatched_directories, [self.doomed])
+
+        os.mkdir(self.doomed)
+
+        self.assertEqual(monitor.recover_directories_once(), [self.doomed])
+        # Prima evaluare raportează pierderea pe care n-a văzut-o niciun heartbeat.
+        self.assertFalse(monitor.covers_all_directories())
+        self.assertTrue(monitor.covers_all_directories())
+
+    def test_the_recovery_is_logged_and_a_second_loss_is_logged_again(self) -> None:
+        monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
+        self._wait_for_dead_emitter_after_rmtree(monitor)
+        monitor.recover_directories_once()
+        os.mkdir(self.doomed)
+
+        with patch.object(monitor.logger, "info") as info:
+            monitor.recover_directories_once()
+
+        self.assertIn(self.doomed, info.call_args.args)
+
+        self._wait_for_dead_emitter_after_rmtree(monitor)
+        with patch.object(monitor.logger, "warning") as warning:
+            monitor.lost_directories()
+
+        warning.assert_called_once()
+
+    def test_after_stop_no_directory_is_scheduled(self) -> None:
+        monitor = self._start([self.kept, self.late], recovery_poll_seconds=3600)
+        monitor.stop()
+
+        os.mkdir(self.late)
+
+        self.assertEqual(monitor.recover_directories_once(), [])
 
 
 class PipelineAliveTests(unittest.TestCase):
@@ -294,6 +508,18 @@ class PipelineAliveTests(unittest.TestCase):
 
         self.monitor.releaser.stop()
         self.monitor.releaser.join(timeout=5)
+
+        self.assertTrue(self.monitor.is_running())
+        self.assertFalse(self.monitor.pipeline_alive())
+
+    def test_a_dead_recovery_thread_stops_the_pipeline(self) -> None:
+        """Fără el, un director pierdut n-ar mai reveni până la repornire."""
+        self.monitor.start()
+
+        recovery_thread = self.monitor._recovery_thread
+        assert recovery_thread is not None  # pentru verificatorul de tipuri
+        self.monitor._recovery_stop.set()
+        recovery_thread.join(timeout=5)
 
         self.assertTrue(self.monitor.is_running())
         self.assertFalse(self.monitor.pipeline_alive())

@@ -1,5 +1,6 @@
 import logging
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -45,6 +46,14 @@ DEFAULT_RELEASE_POLL_SECONDS = 0.25
 #
 # O secundă acoperă confortabil MAX_HASH_QUEUE_DEPTH scrieri în spool.
 DEFAULT_SHUTDOWN_REPORT_RESERVE_SECONDS = 1.0
+
+# Cât de des caută firul de recuperare directoarele configurate care au apărut
+# sau au reapărut. Aceeași valoare ca intervalul implicit de heartbeat
+# (config.example.json): un director recreat intră sub observer în cel mult
+# atât, deci heartbeat-ul următor îl raportează deja. Firul e separat de
+# heartbeat tocmai ca recuperarea să nu se rărească odată cu backoff-ul unei
+# pene de server: evenimentele directorului recuperat merg oricum în spool.
+DEFAULT_DIRECTORY_RECOVERY_SECONDS = 10.0
 
 
 class FileMonitorError(Exception):
@@ -303,6 +312,10 @@ class FileMonitor:
 
     Separarea nu e ornamentală: fiecare etaj protejează garanția etajului de
     dinaintea lui de latența etajului de după.
+
+    Un al patrulea fir, în afara lanțului, ține zona completă: programează sub
+    observer directoarele configurate care apar după pornire sau reapar după
+    ce au fost șterse ori mutate (recover_directories_once()).
     """
 
     def __init__(
@@ -318,6 +331,7 @@ class FileMonitor:
         max_wait_seconds: float = DEFAULT_MAX_SETTLE_WAIT_SECONDS,
         release_poll_seconds: float = DEFAULT_RELEASE_POLL_SECONDS,
         report_reserve_seconds: float = DEFAULT_SHUTDOWN_REPORT_RESERVE_SECONDS,
+        recovery_poll_seconds: float = DEFAULT_DIRECTORY_RECOVERY_SECONDS,
         # Reglajele hasher-ului. Trec prin monitor pentru că el construiește
         # FileHasher; valorile implicite rămân cele din services/file_hasher.py,
         # unde stă și raționamentul care le-a ales. Un apelant care nu le pasează
@@ -329,6 +343,7 @@ class FileMonitor:
         clock: Callable[[], float] = time.monotonic,
     ):
         self.report_reserve_seconds = report_reserve_seconds
+        self.recovery_poll_seconds = recovery_poll_seconds
         self._clock = clock
         self.agent_id = agent_id
         self.agent_instance_id = agent_instance_id
@@ -371,27 +386,49 @@ class FileMonitor:
 
         self._started = False
 
-        # Directoarele configurate pe care start() nu le-a putut programa.
-        # Pornirea merge mai departe cât timp măcar unul e valid, deci fără
-        # lista asta heartbeat-ul ar raporta "active" peste o zonă supravegheată
-        # doar în parte (agent.py::assess_monitoring).
-        self.skipped_directories: list = []
+        # Directoarele configurate care nu sunt sub observer acum: lipseau la
+        # pornire sau au fost scoase de firul de recuperare după ce s-au
+        # pierdut. Pornirea merge mai departe cât timp măcar unul e valid, deci
+        # fără lista asta heartbeat-ul ar raporta "active" peste o zonă
+        # supravegheată doar în parte (agent.py::assess_monitoring).
+        self.unwatched_directories: list = []
 
-        # Emitter-ul watchdog al fiecărui director programat, reținut la
-        # programare. Când directorul e șters, watchdog oprește DOAR emitter-ul
-        # lui (read_directory_changes.py / inotify.py: self.stop()), iar
-        # observer-ul rămâne viu: pipeline_alive() nu vede nimic. Referința
-        # proprie scutește heartbeat-ul de iterat setul intern al observer-ului,
-        # pe care firul lui îl poate modifica între timp.
+        # Emitter-ul și watch-ul watchdog al fiecărui director programat,
+        # reținute la programare. Când directorul e șters, watchdog oprește
+        # DOAR emitter-ul lui (read_directory_changes.py / inotify.py:
+        # self.stop()), iar observer-ul rămâne viu: pipeline_alive() nu vede
+        # nimic. Referința proprie scutește heartbeat-ul de iterat setul intern
+        # al observer-ului, pe care firul lui îl poate modifica între timp.
         self._emitter_for_directory: dict = {}
+        self._watch_for_directory: dict = {}
         self._reported_lost_directories: set = set()
+
+        # Identitatea (st_dev, st_ino) a directorului găsit la cale în clipa
+        # programării. Un director mutat și înlocuit cu altul la aceeași cale
+        # lasă emitter-ul vechi viu și calea director; doar identitatea îl
+        # deosebește de cel programat.
+        self._identity_for_directory: dict = {}
+
+        # Pierderile pe care niciun heartbeat nu le-a raportat încă. Firul de
+        # recuperare poate repune un director șters și recreat înainte de
+        # heartbeat-ul următor; fără zăvorul ăsta, pierderea n-ar lăsa nicio
+        # urmă pe server. covers_all_directories() îl golește când raportează.
+        self._unreported_losses: set = set()
+
+        # Hărțile de mai sus le scrie firul de recuperare și le citește firul
+        # de heartbeat. Reentrant, pentru că trecerea de recuperare cheamă
+        # lost_directories(), care ia și ea lacătul.
+        self._coverage_lock = threading.RLock()
+        self._recovery_stop = threading.Event()
+        self._recovery_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         """
         Pornește monitorizarea pentru toate directoarele valide configurate.
 
         Directoarele inexistente sunt ignorate, raportate în log și reținute în
-        skipped_directories, de unde heartbeat-ul raportează "partial".
+        unwatched_directories, de unde heartbeat-ul raportează "partial" până
+        când firul de recuperare le găsește și le programează.
         Agentul nu creează automat directoare arbitrare din configurație.
 
         Firele auxiliare pornesc doar dacă observer-ul a pornit: fără
@@ -404,9 +441,13 @@ class FileMonitor:
             return
 
         valid_directories_count = 0
-        self.skipped_directories = []
+        self.unwatched_directories = []
         self._emitter_for_directory = {}
+        self._watch_for_directory = {}
         self._reported_lost_directories = set()
+        self._identity_for_directory = {}
+        self._unreported_losses = set()
+        self._recovery_stop.clear()
 
         for directory in self.monitored_directories:
             directory_path = Path(directory)
@@ -416,7 +457,7 @@ class FileMonitor:
                     "Monitored directory does not exist and will be skipped: %s",
                     directory_path,
                 )
-                self.skipped_directories.append(str(directory_path))
+                self.unwatched_directories.append(str(directory_path))
                 continue
 
             if not directory_path.is_dir():
@@ -424,22 +465,10 @@ class FileMonitor:
                     "Configured monitored path is not a directory and will be skipped: %s",
                     directory_path,
                 )
-                self.skipped_directories.append(str(directory_path))
+                self.unwatched_directories.append(str(directory_path))
                 continue
 
-            watch = self.observer.schedule(
-                self.handler,
-                str(directory_path),
-                recursive=self.recursive_monitoring,
-            )
-            self._emitter_for_directory[str(directory_path)] = next(
-                (
-                    emitter
-                    for emitter in self.observer.emitters
-                    if emitter.watch == watch
-                ),
-                None,
-            )
+            self._schedule_directory(str(directory_path))
 
             valid_directories_count += 1
 
@@ -457,6 +486,12 @@ class FileMonitor:
         self.observer.start()
         self.hasher.start()
         self.releaser.start()
+        self._recovery_thread = threading.Thread(
+            target=self._run_recovery,
+            name="directory-recovery",
+            daemon=True,
+        )
+        self._recovery_thread.start()
         self._started = True
 
         self.logger.info(
@@ -464,26 +499,181 @@ class FileMonitor:
             valid_directories_count,
         )
 
-        if self.skipped_directories:
+        if self.unwatched_directories:
             self.logger.warning(
                 "File monitoring covers %s of %s configured directories. "
-                "Heartbeat reports monitoring=partial. Skipped: %s",
+                "Heartbeat reports monitoring=partial until they appear. "
+                "Skipped: %s",
                 valid_directories_count,
                 len(self.monitored_directories),
-                ", ".join(self.skipped_directories),
+                ", ".join(self.unwatched_directories),
             )
+
+    @staticmethod
+    def _directory_identity(directory: str) -> Optional[tuple]:
+        """
+        (st_dev, st_ino) al directorului de la cale, None dacă la cale nu e
+        un director. Pe NTFS, st_ino e ID-ul de fișier: o mutare în același
+        volum îl păstrează, un director nou primește altul.
+        """
+        try:
+            status = os.stat(directory)
+        except OSError:
+            return None
+
+        if not stat.S_ISDIR(status.st_mode):
+            return None
+
+        return (status.st_dev, status.st_ino)
+
+    def _schedule_directory(self, directory: str) -> None:
+        """
+        Pune directorul sub observer și reține watch-ul, emitter-ul și
+        identitatea lui.
+        """
+        watch = self.observer.schedule(
+            self.handler,
+            directory,
+            recursive=self.recursive_monitoring,
+        )
+        self._watch_for_directory[directory] = watch
+        self._identity_for_directory[directory] = self._directory_identity(directory)
+        self._emitter_for_directory[directory] = next(
+            (
+                emitter
+                for emitter in self.observer.emitters
+                if emitter.watch == watch
+            ),
+            None,
+        )
+
+    def _unschedule_directory(self, directory: str) -> None:
+        """
+        Scoate de sub observer watch-ul unui director pierdut.
+
+        Fără pasul ăsta, reprogramarea aceleiași căi nu face nimic: watchdog
+        cheiază emitter-ele după (cale, recursiv, filtru) și, găsind-o deja,
+        atașează handler-ul la emitter-ul vechi, oprit.
+
+        Pe Windows, emitter-ul oprit la ștergere și-a închis deja handle-ul de
+        director (read_directory_changes.py: on_thread_stop), dar nu-l golește.
+        unschedule() îl oprește încă o dată, deci l-ar închide a doua oară, iar
+        între timp valoarea numerică poate aparține altui obiect al procesului:
+        fișierul spool-ului, un socket, handle-ul unui emitter nou. Golirea
+        _whandle pe un emitter deja oprit face a doua oprire inofensivă.
+        stopped_event, nu is_alive(): evenimentul se setează înainte de
+        închidere, firul moare abia după. Presupunerea e fixată pe watchdog
+        6.0.0 de tests/test_monitoring_state.py::DirectoryRecoveryTests.
+        Pe Linux, inotify își golește singur referința, deci n-are nevoie.
+        """
+        watch = self._watch_for_directory.pop(directory, None)
+        emitter = self._emitter_for_directory.pop(directory, None)
+        self._identity_for_directory.pop(directory, None)
+
+        if emitter is not None and emitter.stopped_event.is_set():
+            if hasattr(emitter, "_whandle"):
+                emitter._whandle = None
+
+        if watch is not None:
+            self.observer.unschedule(watch)
+
+    def recover_directories_once(self) -> list:
+        """
+        O trecere de recuperare: zona configurată revine sub observer.
+
+        1. Directoarele programate care s-au pierdut (lost_directories()) ies
+           de sub observer și trec în unwatched_directories. Unul mutat își
+           ține emitter-ul viu la noua locație: scos, nu mai raportează fișiere
+           din afara zonei configurate.
+        2. Fiecare director din unwatched_directories care e acum director e
+           programat din nou. Un director șters și recreat, sau mutat și
+           înlocuit, între două treceri parcurge ambii pași în aceeași trecere.
+
+        Pierderea rămâne în zăvorul _unreported_losses până o raportează un
+        heartbeat, chiar dacă directorul e deja recuperat.
+
+        Metoda este publică și apelabilă direct din teste, ca
+        SettleReleaser.release_due_once(): firul dă doar cadența.
+
+        Returnează directoarele programate din nou în trecerea asta.
+        """
+        recovered = []
+
+        with self._coverage_lock:
+            # stop() setează evenimentul sub același lacăt, deci după el nicio
+            # trecere nu mai programează nimic pe un observer care se oprește.
+            if self._recovery_stop.is_set():
+                return recovered
+
+            for directory in self.lost_directories():
+                self.unwatched_directories.append(directory)
+                self._unschedule_directory(directory)
+
+            for directory in list(self.unwatched_directories):
+                if not os.path.isdir(directory):
+                    continue
+
+                try:
+                    self._schedule_directory(directory)
+                except OSError as error:
+                    # Directorul a dispărut între verificare și programare.
+                    # Rămâne nesupravegheat; trecerea următoare reîncearcă.
+                    self.logger.debug(
+                        "Could not schedule reappeared directory %s: %s",
+                        directory,
+                        error,
+                    )
+                    continue
+
+                self.unwatched_directories.remove(directory)
+                self._reported_lost_directories.discard(directory)
+                recovered.append(directory)
+
+        for directory in recovered:
+            self.logger.info(
+                "Monitored directory is watched again (it was missing, deleted "
+                "or moved): %s | recursive=%s",
+                directory,
+                self.recursive_monitoring,
+            )
+
+        return recovered
+
+    def _run_recovery(self) -> None:
+        """
+        Bucla firului de recuperare, cu garda fiecărei treceri, ca la
+        SettleReleaser.run(): un fir mort aici n-ar orbi nimic pe loc, dar o
+        zonă pierdută n-ar mai reveni niciodată, iar pipeline_alive() îl
+        socotește oricum, deci starea ar deveni "stopped".
+        """
+        while not self._recovery_stop.wait(self.recovery_poll_seconds):
+            try:
+                self.recover_directories_once()
+            except Exception:
+                self.logger.exception(
+                    "Directory recovery pass failed; the loop continues."
+                )
 
     def stop(self) -> None:
         """
-        Oprește observer-ul watchdog. Deliberat, NU oprește celelalte fire.
+        Oprește observer-ul watchdog și firul de recuperare. Deliberat, NU
+        oprește celelalte fire.
 
         Ordinea la oprire nu este negociabilă și trăiește în join(): fiecare
         etaj trebuie drenat complet înainte ca următorul să fie semnalizat,
         altfel drenarea unuia produce intrări pe care următorul nu le mai
         colectează niciodată.
+
+        Firul de recuperare se oprește primul, sub lacătul hărții de
+        acoperire: o trecere în curs își termină programarea, iar după ea nu
+        mai începe niciuna. Altfel ar putea porni un emitter nou exact când
+        observer-ul și-a scos emitter-ele, iar acela n-ar mai fi oprit de
+        nimeni.
         """
         if self._started:
             self.logger.info("Stopping file monitoring...")
+            with self._coverage_lock:
+                self._recovery_stop.set()
             self.observer.stop()
 
     def join(self, timeout: Optional[float] = None) -> bool:
@@ -532,6 +722,9 @@ class FileMonitor:
                 return None
             return max(0.0, deadline - self._clock())
 
+        if self._recovery_thread is not None:
+            self._recovery_thread.join(timeout=remaining())
+
         self.observer.join(timeout=remaining())
 
         self.releaser.stop()
@@ -548,6 +741,7 @@ class FileMonitor:
         stalled = [
             name
             for name, alive in (
+                ("directory recovery", self._recovery_alive()),
                 ("watchdog observer", self.observer.is_alive()),
                 ("settle releaser", self.releaser.is_alive()),
                 ("file hasher", self.hasher.is_alive()),
@@ -565,14 +759,20 @@ class FileMonitor:
 
         return True
 
+    def _recovery_alive(self) -> bool:
+        return self._recovery_thread is not None and self._recovery_thread.is_alive()
+
     def pipeline_alive(self) -> bool:
         """
-        Toate cele trei etaje sunt vii: observer, releaser, hasher.
+        Toate cele trei etaje sunt vii (observer, releaser, hasher), plus firul
+        de recuperare a directoarelor.
 
         is_running() se uită doar la observer, dar un releaser sau un hasher
         mort lasă observer-ul să observe în gol: fișierele intră în tracker sau
         în coada de hashing și nu mai ies niciodată spre spool. Pentru server,
         rezultatul e identic cu un observer mort — zero evenimente de fișier.
+        Un fir de recuperare mort nu orbește nimic pe loc, dar un director
+        pierdut n-ar mai reveni fără repornire, deci tot repornirea e remediul.
         Folosit de heartbeat ca să raporteze supravegherea (agent.py::
         assess_monitoring), la fiecare heartbeat, nu o singură dată la pornire.
         """
@@ -581,55 +781,75 @@ class FileMonitor:
             and self.observer.is_alive()
             and self.releaser.is_alive()
             and self.hasher.is_alive()
+            and self._recovery_alive()
         )
 
     def lost_directories(self) -> list:
         """
-        Directoarele programate la pornire care nu mai sunt supravegheate acum.
+        Directoarele programate care nu mai sunt supravegheate acum.
 
         Două semne, verificate la fiecare apel:
         - emitter-ul lor s-a oprit: watchdog face asta singur când directorul
           supravegheat e șters;
-        - calea nu mai e un director: un director mutat sau redenumit își
+        - la cale nu mai e directorul programat: fie nu mai e niciun director,
+          fie e altul, cu altă identitate. Un director mutat sau redenumit își
           păstrează emitter-ul viu pe Windows, dar acesta urmărește directorul
-          la noua lui locație, nu calea configurată.
+          la noua lui locație, nu calea configurată; dacă la cale apare între
+          timp alt director, doar identitatea arată că nu e cel urmărit.
 
-        Pierderea e definitivă până la repornire: un director recreat la
-        aceeași cale nu mai e urmărit de emitter-ul oprit (limita „director
-        creat mai târziu", declarată în contract). Un director mutat și
-        înlocuit cu altul la aceeași cale NU se vede aici.
+        Heartbeat-ul vede pierderea aici imediat; firul de recuperare scoate
+        apoi directorul de sub observer (unwatched_directories) și îl
+        programează din nou când reapare. Prima detecție a unei pierderi intră
+        și în zăvorul _unreported_losses.
         """
-        lost = [
-            directory
-            for directory, emitter in self._emitter_for_directory.items()
-            if emitter is None
-            or not emitter.is_alive()
-            or not os.path.isdir(directory)
-        ]
+        with self._coverage_lock:
+            lost = [
+                directory
+                for directory, emitter in self._emitter_for_directory.items()
+                if emitter is None
+                or not emitter.is_alive()
+                or self._directory_identity(directory)
+                != self._identity_for_directory.get(directory)
+            ]
 
-        for directory in lost:
-            if directory not in self._reported_lost_directories:
-                self._reported_lost_directories.add(directory)
-                self.logger.warning(
-                    "Monitored directory is no longer watched (deleted, moved "
-                    "or its watcher stopped): %s. Heartbeat reports "
-                    "monitoring=partial until the agent restarts.",
-                    directory,
-                )
+            for directory in lost:
+                if directory not in self._reported_lost_directories:
+                    self._reported_lost_directories.add(directory)
+                    self._unreported_losses.add(directory)
+                    self.logger.warning(
+                        "Monitored directory is no longer watched (deleted, "
+                        "moved or its watcher stopped): %s. Heartbeat reports "
+                        "monitoring=partial until it reappears.",
+                        directory,
+                    )
 
         return lost
 
     def covers_all_directories(self) -> bool:
         """
-        Fiecare director configurat a fost programat la pornire și e încă
-        supravegheat acum.
+        Fiecare director configurat e sub observer acum, iar emitter-ul lui
+        trăiește.
 
-        Partea de la pornire se fixează în start(): un director care apare mai
-        târziu nu intră sub observer, deci zona rămâne parțială până la
-        repornirea agentului (limită declarată în contracts/wire-contract.json,
-        heartbeat_request.notes). Partea de acum vine din lost_directories().
+        Trei părți: unwatched_directories (lipsea la pornire, sau firul de
+        recuperare l-a scos după ce s-a pierdut), lost_directories() (s-a
+        pierdut după ultima trecere a firului de recuperare) și zăvorul
+        _unreported_losses. Primele două se golesc singure când directorul
+        reapare, în cel mult recovery_poll_seconds.
+
+        Zăvorul face ca orice pierdere să ajungă pe server, oricât de scurtă:
+        un director șters și recreat între două heartbeat-uri e recuperat
+        înainte ca vreun heartbeat să-l vadă lipsă. Apelul CONSUMĂ zăvorul,
+        deci îl face heartbeat-ul (agent.py::assess_monitoring): un rezultat
+        False raportează toate pierderile de până acum, iar următorul apel
+        poate întoarce True.
         """
-        return not self.skipped_directories and not self.lost_directories()
+        with self._coverage_lock:
+            # lost_directories() întâi: poate adăuga în zăvor o pierdere nouă,
+            # pe care rezultatul de acum o și raportează.
+            complete = not self.lost_directories() and not self.unwatched_directories
+            had_unreported_losses = bool(self._unreported_losses)
+            self._unreported_losses.clear()
+            return complete and not had_unreported_losses
 
     def is_running(self) -> bool:
         """Returnează dacă observer-ul de monitorizare este activ."""
