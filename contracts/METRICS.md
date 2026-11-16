@@ -96,11 +96,35 @@ fost urcat integral pentru analiză pe server.
 
 **Numitorul include plicul, nu doar conținutul.** Un sistem always-upload nu
 trimite fișiere goale: trimite fișierul *plus* aceleași metadate de identificare.
-Numitorul e deci `conținut + plic`, cu același plic ca la numărător.
+Numitorul e deci `conținut + plic`.
 
-Corecția merge aparent în defavoarea protocolului — raportul devine
-`plic / (plic + conținut)` în loc de `plic / conținut` — și tocmai de aceea
-apără afirmația: nimeni nu poate susține că numitorul a fost umflat.
+Corecția mută raportul **în favoarea** protocolului — `plic / (plic + conținut)`
+e mai mic decât `plic / conținut` — și tocmai de aceea plicul din numitor nu are
+voie să fie nici cu un octet mai mare decât cel de la numărător. Orice octet în
+plus acolo e o umflare a numitorului, adică exact obiecția pe care definiția
+trebuie s-o facă imposibilă.
+
+**Plicul se măsoară cu rigla numărătorului.** Regula, nu o egalitate descrisă:
+
+| numărătorul (`numerator_source`) | plicul din numitor (`envelope_source`) |
+|---|---|
+| `measured` — corpul cererilor numărat pe fir | corpul cererii care a creat fiecare eveniment, consemnat de server la primire |
+| `estimated` — reserializarea evenimentelor stocate | reserializarea aceluiași eveniment |
+
+Nicio cifră nu amestecă rigle. Formularea anterioară — „același plic ca la
+numărător" — era adevărată cât timp ambele părți reserializau evenimentul
+stocat, și a devenit falsă fără să se schimbe un rând de aici când numărătorul a
+trecut pe măsurătoare (edr-server#14). Evenimentul stocat poartă câmpuri pe care
+agentul nu le-a trimis (`event_id`, `received_at`, `run_id`, `status`,
+`reputation`, `prevalence`, nulurile explicite), deci reserializarea lui e mai
+lungă decât corpul de pe fir. Pe un fișier de 900 B, cu 811 B reserializați și
+490 B pe fir, raportul publicat ieșea 0,286 în loc de 0,353 — eroare invizibilă
+la fișierele mari, de ordinul a 19% din numitor sub 2 KB.
+
+Plicul de pe fir per eveniment se consemnează o singură dată, la prima sosire.
+Retransmisiile rămân doar în numărătorul măsurat (§1.3), deci asimetria care
+rămâne poate face protocolul să pară cel mult mai scump, niciodată mai ieftin.
+Regula o apără `app/tests/test_measured_envelope.py`.
 
 **Numitorul e definit doar pentru fișierele cu dimensiune cunoscută**, adică
 `hash_status == "ok"`. Restul intră la §2.1.
@@ -114,6 +138,15 @@ Efectul e o **subestimare** a economiei.
 Golul se raportează întotdeauna, defalcat pe status: `unstable`, `unreadable`,
 `too_large`, `vanished`, `skipped_capacity`, `skipped_shutdown`. Un raport de
 divulgare fără el e un raport care ascunde câte fișiere n-a putut măsura.
+
+**Plicul nemăsurat, tot în golul de dimensiune.** Cu numărătorul măsurat, un
+fișier hash-uit al cărui plic de pe fir nu s-a consemnat — evenimente mai vechi
+decât consemnarea, cereri fără `Content-Length` — iese din numitor cu totul,
+conținut și plic, iar numărul lor se raportează ca `envelope_unmeasured`.
+Completat cu plicul reserializat, ar fi readus exact octeții adăugați de server;
+scos, numitorul scade, ceea ce e tot o subestimare a economiei. Cu numărătorul
+estimat, `envelope_unmeasured` e zero: orice eveniment are un plic
+reserializabil.
 
 **Golul de atribuire, a doua categorie.** Pe lângă fișierele fără dimensiune
 cunoscută, se raportează separat evenimentele care au divulgat ceva fără să
@@ -136,6 +169,47 @@ Octeții din golul de atribuire intră **întotdeauna în numărător**. Un octe
 a părăsit endpoint-ul a plecat indiferent dacă știm cărei trepte să-l atribuim;
 scos din numărător pentru că atribuirea lipsește, ar deplasa cifra exact în
 direcția care flatează afirmația.
+
+### 2.2 Concentrarea numitorului
+
+Numitorul nu e măsurat, e **declarat**: `file_size` vine din `stat()`-ul
+agentului. Numărătorul se poate măsura pe fir (§7), numitorul nu. Până la
+contract v12 câmpul n-avea nicio limită, iar un singur eveniment cu
+`file_size = 10^15` lângă zece fișiere de 1 MB a dus raportul de la 0,000336 la
+0,0, fără nicio urmă că un eveniment din unsprezece îl produsese.
+
+De la v12 schema respinge cu 422 orice `file_size` negativ sau ne-întreg. Limita
+de sus nu se impune: plafonul real e `hash_max_file_size_bytes` din configul
+agentului, pe care serverul nu-l cunoaște. Un prag ales pe server ar fi ori prea
+larg ca să prindă ceva, ori ar respinge un fișier real. Mai mult, niciun prag
+n-ar prinde un agent care minte în limite plauzibile, de exemplu 200 MiB la
+fiecare fișier.
+
+Apărarea e deci o declarație lângă cifră, nu un prag. `always_upload.concentration`
+raportează:
+
+- `largest_event` — evenimentul cu cea mai mare contribuție la numitor
+  (`event_id`, `agent_id`, `bytes`, `share`);
+- `by_agent` — pentru fiecare agent, câte evenimente, câți octeți și ce cotă din
+  numitor.
+
+Contribuția e `file_size + plic`, cu plicul măsurat cu rigla numitorului (§2),
+deci cotele din `by_agent` se adună la 1. Un `share` apropiat de 1 la
+`largest_event` înseamnă că raportul descrie un singur fișier, nu rularea; unul
+apropiat de 1 la un agent, într-un parc, înseamnă că raportul descrie acel
+endpoint.
+
+**Ce nu se calculează: raportul fără evenimentul cel mai mare.** Scos din
+numitor, evenimentul ar trebui scos și din numărător, iar sub numărătorul
+măsurat serverul are doar totalul de pe fir, nu octeți per eveniment (§3.2).
+Cele două părți ar ajunge pe rigle diferite, exact greșeala închisă la
+edr-server#14.
+
+**Evenimentele de dinainte de v12.** Depozitul păstrează evenimente primite când
+`-5000000`, `true` și `4096.0` treceau. Un fișier hash-uit a cărui dimensiune
+stocată nu e un întreg nenegativ iese din numitor cu totul și se numără ca
+`unmeasured.file_size_invalid`. Lăsat înăuntru, un negativ ar micșora
+numitorul, iar un `true` l-ar crește cu un octet inventat.
 
 ---
 
@@ -753,12 +827,18 @@ agent înainte de ultima repornire a serverului. Amândouă se raportează, la
 `unmeasured_before_adoption_bytes` nenul e incomplet, nu greșit — iar §8 cere ca
 diferența să fie declarată, nu presupusă. Un mesaj la fiecare repornire ar fi cerut.
 
-Numărătorul publicat rămâne aproximarea din
-`disclosure_metrics.py::_payload_bytes`: reserializarea evenimentului stocat,
-care include câmpuri adăugate de server și exclude anteturile HTTP. Cifra
-măsurată există acum lângă ea, în `reconciliation`, dar până când cele două se
-închid una peste alta orice cifră publicată din estimator se declară ca
-**estimare**, nu ca măsurătoare — vezi §8.
+Estimatorul din `disclosure_metrics.py::_payload_bytes` — reserializarea
+evenimentului stocat, cu câmpurile adăugate de server și fără anteturile HTTP —
+rămâne numărătorul doar când măsurătoarea lipsește sau nu se aplică rulării
+cerute, și atunci se declară ca **estimare** (`numerator_source: estimated`),
+nu ca măsurătoare — vezi §8.
+
+**Numitorul urmează numărătorul.** Când numărătorul a trecut pe măsurătoare,
+plicul din numitor a rămas reserializarea, deci cele două părți ale raportului
+foloseau rigle diferite, iar cea a numitorului era mai lungă (edr-server#14).
+Din acel moment serverul consemnează corpul fiecărei cereri de eveniment la
+primire, în tabelul `event_wire`, iar numitorul măsurat ia plicul de acolo.
+Regula și golul ei sunt la §2 și §2.1.
 
 ### 7.6 Ce rămâne estimat chiar și după 1.3b
 
@@ -773,6 +853,15 @@ Asimetria se declară, nu se ascunde:
 
 - numărătorul **agregat** e măsurat;
 - cifrele **per fișier** rămân estimate prin reserializare.
+
+**Circularitatea e a mesajului, nu a serverului.** Ea apare doar dacă valoarea
+trebuie să călătorească *în* mesaj. Serverul o poate observa din afara lui: cum
+agentul trimite un eveniment pe cerere, `Content-Length` al cererii e plicul
+exact al acelui eveniment, iar din edr-server#14 serverul îl consemnează la
+primire, în `event_wire`. Cu el, raportul per fișier
+`plic / (file_size + plic)` devine măsurabil la T0 — măsurat la prima sosire,
+fără retransmisii. Mediana și p95 nu se calculează încă nicăieri; până atunci,
+asimetria de mai sus rămâne cea publicată, dar nu mai e inevitabilă.
 
 Rezultatul util e că totalul măsurat, comparat cu suma estimărilor, dă eroarea
 estimatorului. Cu factorul acela, cifrele per fișier se pot mărgini onest:
@@ -825,6 +914,8 @@ greșit, iar responsabilitatea e a celui care a publicat-o.
 - corpusul: câte fișiere, ce distribuție de dimensiuni, ce fracțiune malițioasă
 - suprapunerea între endpoint-uri, când cifra e per parc
 - golul din §2.1, pe statusuri
+- concentrarea numitorului din §2.2: cota evenimentului celui mai mare și a
+  fiecărui agent
 - dacă numărătorul e măsurat sau estimat, și — când e estimat lângă o
   contabilizare nenulă — motivul (§7.5)
 - politica activă și calibrarea parametrului de cost
