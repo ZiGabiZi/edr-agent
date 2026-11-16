@@ -62,7 +62,7 @@ def build_file_event_payload(
     Construiește payload-ul unui eveniment de fișier.
 
     occurred_at este momentul PRIMEI observații a fișierului, furnizat de
-    SettleTracker (Decizia 1). Trebuie transmis explicit tocmai pentru că
+    SettleTracker. Trebuie transmis explicit tocmai pentru că
     raportarea are loc cu întârziere, după stabilizare: calculat aici, ar fi
     momentul emiterii, nu al faptului, iar serverul ar ordona evenimentele
     greșit — exact eroarea pe care câmpul occurred_at a fost introdus s-o

@@ -1,5 +1,5 @@
 """
-Teste pentru SettleTracker (Pasul 0.2).
+Teste pentru SettleTracker.
 
 Mecanismul este pură logică de timp, cu ceasuri injectate: niciun test nu
 atinge discul și niciunul nu așteaptă timp real.
@@ -112,7 +112,7 @@ class SettleTrackerTests(unittest.TestCase):
         self.assertEqual(released[0].forced_reason, "ceiling")
 
     def test_event_type_is_frozen_at_the_first_observation(self):
-        """Decizia 1: eticheta o dă observația care a deschis fereastra."""
+        """Eticheta o dă observația care a deschis fereastra."""
         self.tracker.observe("/tmp/a.exe", "file_created")
         self.clock.advance(0.2)
         self.tracker.observe("/tmp/a.exe", "file_modified")
@@ -212,7 +212,7 @@ class SettleTrackerTests(unittest.TestCase):
 
 
 class OccurredAtTests(unittest.TestCase):
-    """Decizia 1: occurred_at este prima observație, nu momentul emiterii."""
+    """occurred_at este prima observație, nu momentul emiterii."""
 
     def setUp(self):
         self.clock = FakeClock()
@@ -243,7 +243,7 @@ class OccurredAtTests(unittest.TestCase):
 
 
 class SettleWaitTests(unittest.TestCase):
-    """Decizia 2: settle_wait_ms se populează începând cu Pasul 0.2."""
+    """settle_wait_ms: latența introdusă de tracker, sub measurements."""
 
     def setUp(self):
         self.clock = FakeClock()
@@ -477,9 +477,9 @@ class ReintroductionTests(unittest.TestCase):
 
     def test_the_event_type_stays_the_one_that_opened_the_entry(self) -> None:
         """
-        Decizia 1 nu se pierde la merge: intrarea reintrodusă e ACEEAȘI apariție
-        a fișierului, deci poartă tipul și occurred_at ale observației care a
-        deschis-o — nu o pereche amestecată din două momente diferite.
+        Tipul și occurred_at nu se pierd la merge: intrarea reintrodusă e
+        ACEEAȘI apariție a fișierului, deci le poartă pe cele ale observației
+        care a deschis-o — nu o pereche amestecată din două momente diferite.
         """
         tracker, clock = self._make_tracker()
         pending = self._settled(tracker, clock)

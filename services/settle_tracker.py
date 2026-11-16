@@ -41,8 +41,8 @@ class PendingFile:
     """
 
     path: str #calea normalizată, așa cum va fi raportată
-    event_type: str #tipul înghețat la prima observație (vezi Decizia 1)
-    occurred_at: str #ceasul de perete la PRIMA observație (Decizia 1)
+    event_type: str #tipul înghețat la prima observație: eticheta o dă observația care a deschis intrarea
+    occurred_at: str #ceasul de perete la PRIMA observație, nu la emitere
     first_seen: float #ceasul monoton la prima observație, PESTE toate reintroducerile
     last_seen: float #ceasul monoton la ultima dovadă că fișierul se schimbă
     released_at: Optional[float] = None #ceasul monoton la eliberare (None cât e în așteptare)
@@ -55,7 +55,7 @@ class PendingFile:
     # la fiecare reintroducere.
     #
     # Există pentru că first_seen avea două slujbe care aveau accidental același
-    # răspuns până la Pasul 0.3:
+    # răspuns cât timp nu exista verificarea dublă din jurul hashing-ului:
     #   - ancora costului (settle_wait_ms), care trebuie să acopere TOT, inclusiv
     #     ciclurile de reintroducere — vezi contracts/wire-contract.json,
     #     models.event_measurements;
@@ -177,7 +177,7 @@ class SettleTracker:
 
         Cheia este calea, nu perechea (tip, cale): un fișier creat și apoi scris
         de opt ori este o singură sosire, nu două evenimente. Tipul rămâne cel
-        al observației care a deschis intrarea — vezi Decizia 1 și nota din
+        al observației care a deschis intrarea — vezi nota din
         contracts/wire-contract.json despre event_type ca observație locală,
         nu ca afirmație autoritară despre noutate.
         """
@@ -254,8 +254,12 @@ class SettleTracker:
         Eliberează tot ce este în așteptare, indiferent de ceas.
 
         Folosit la oprirea agentului: intrările rămase în așteptare ar fi altfel
-        pierdute complet. Comportamentul din Pasul 0.2 este eliberarea imediată;
-        persistarea lor în spool pentru reluare după repornire este Pasul 0.2b.
+        pierdute complet. Tracker-ul le eliberează imediat, cu
+        forced_reason='shutdown'; cât din ele se mai hash-uiește decide bugetul
+        de oprire din FileHasher, iar ce nu mai încape se raportează cu
+        hash_status='skipped_shutdown', nu se pierde. Intrările NU se salvează
+        pe disc pentru reluare la repornire: ce se întâmplă cât agentul e oprit
+        cere o reconciliere a directoarelor la pornire, nu o coadă persistată.
         """
         now = self._clock()
 
