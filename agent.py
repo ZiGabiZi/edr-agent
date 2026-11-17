@@ -805,7 +805,13 @@ def heartbeat_loop(
             logger.info(f"Heartbeat response: {response}")
             auth_alarm.record_success()
 
-            directive = response.get("directive") or {}
+            directive = response.get("directive")
+            if not isinstance(directive, dict):
+                logger.warning(
+                    "Ignoring malformed directive from server (%r). Treating as no action.",
+                    directive
+                )
+                directive = {}
             action = directive.get("action", "none")
             """
                 Calea activă de re-înregistrare. Serverul semnalează un agent

@@ -75,6 +75,27 @@ class TransportError(Exception):
     """Eroare ridicată atunci când comunicarea cu serverul EDR eșuează."""
     pass
 
+class MalformedResponseError(TransportError):
+    """
+    Serverul a răspuns cu succes (2xx), dar corpul JSON nu este un obiect.
+
+    De ce o clasă separată, nu un TransportError simplu:
+        Pentru heartbeat și înregistrare, cazul e o eroare temporară obișnuită:
+        răspunsul nu poate fi citit, deci se reîncearcă cu backoff. Pentru
+        evenimente, codul 2xx spune deja tot ce contează: serverul a acceptat
+        evenimentul. Dispatcher-ul nu citește corpul, deci un corp malformat
+        nu face livrarea mai puțin reală. Fără o clasă proprie, dispatcher-ul
+        n-ar putea deosebi cazul de o rețea căzută și ar retrimite la nesfârșit
+        un eveniment deja primit: coada s-ar bloca în spatele lui, iar serverul
+        ar primi duplicate.
+
+    Ce NU intră aici: un corp care nu e JSON deloc, de exemplu HTML de la un
+    portal captiv. Acela rămâne TransportError simplu, ca înainte. Un 200 în
+    HTML vine de obicei de la altcineva decât serverul EDR, deci nu confirmă
+    livrarea.
+    """
+    pass
+
 class FatalTransportError(TransportError):
     """
     Eroare irecuperabilă: cererea nu va fi acceptată niciodată în forma asta.
@@ -190,11 +211,28 @@ def parse_json_response(response: Response) -> Dict[str, Any]:
     Parsează răspunsul JSON primit de la server.
 
     Dacă serverul nu întoarce JSON valid, se ridică o eroare controlată.
+
+    De ce se verifică și forma, nu doar validitatea:
+        response.json() întoarce orice valoare JSON — listă, șir, număr, null.
+        Toți apelanții citesc răspunsul cu .get()/.keys(), deci o valoare
+        validă, dar care nu e obiect, ar produce AttributeError, pe care nicio
+        buclă nu îl prinde: excepția ajungea în run_agent și oprea tot agentul.
+        Ca MalformedResponseError (subclasă de TransportError), cazul intră
+        pe calea obișnuită de backoff: agentul rămâne pornit, colectează local
+        și reîncearcă. Excepția e doar dispatcher-ul de evenimente, care o
+        tratează ca livrare reușită (vezi docstring-ul clasei).
     """
     try:
-        return response.json()
+        body = response.json()
     except ValueError as error:
         raise TransportError("Server returned a non-JSON response") from error
+
+    if not isinstance(body, dict):
+        raise MalformedResponseError(
+            f"Server returned JSON that is not an object ({type(body).__name__})"
+        )
+
+    return body
 
 
 def serialize_payload(payload: Dict[str, Any]) -> bytes:

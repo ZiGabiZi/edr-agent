@@ -48,6 +48,7 @@ from services.transport import (
     FatalTransportError,
     IdentityConflictError,
     IdentityMismatchError,
+    MalformedResponseError,
     TransportError,
     handle_response,
 )
@@ -60,6 +61,22 @@ def _response(status_code: int, payload: Optional[Dict[str, Any]] = None) -> Res
     response._content = json.dumps(payload or {"detail": "x"}).encode("utf-8")
     response.headers["Content-Type"] = "application/json"
     response.url = "http://server/api/events"
+    return response
+
+
+def _raw_response(status_code: int, body: bytes) -> Response:
+    """
+    Răspuns cu corpul dat exact, octet cu octet.
+
+    _response() nu poate produce cazurile de mai jos: `payload or {...}`
+    înlocuiește tocmai valorile falsy ([], null, false, 0), adică jumătate din
+    ce trebuie testat la forma răspunsului.
+    """
+    response = Response()
+    response.status_code = status_code
+    response._content = body
+    response.headers["Content-Type"] = "application/json"
+    response.url = "http://server/api/agents/endpoint-01/heartbeat"
     return response
 
 
@@ -178,6 +195,70 @@ class ErrorClassificationTests(unittest.TestCase):
         self.assertNotIsInstance(raised.exception, FatalTransportError)
 
 
+class ResponseShapeTests(unittest.TestCase):
+    """
+    Un 200 cu JSON valid nu e automat un răspuns utilizabil.
+
+    response.json() întoarce orice valoare JSON, iar toți apelanții citesc
+    rezultatul cu .get()/.keys(). Înainte de verificarea din
+    parse_json_response, un corp [] producea AttributeError în heartbeat_loop,
+    pe care nicio ramură nu îl prindea: excepția ajungea în run_agent, iar
+    finally oprea file monitor-ul, dispatcher-ul și spool-ul. Un singur
+    răspuns de la un server de altă versiune, un proxy sau un server
+    compromis scotea agentul din funcțiune pe tot parcul.
+    """
+
+    NON_OBJECT_BODIES = (b"[]", b'["directive"]', b'"ok"', b"42", b"true", b"null")
+
+    def test_a_200_whose_json_is_not_an_object_is_a_transport_error(self) -> None:
+        for body in self.NON_OBJECT_BODIES:
+            with self.subTest(body=body):
+                with self.assertRaises(TransportError):
+                    handle_response(_raw_response(200, body))
+
+    def test_a_non_object_body_is_temporary_not_fatal(self) -> None:
+        """
+        Fatal ar fi înlocuit o oprire cu alta: FatalTransportError face return
+        din bucla de heartbeat. Ca eroare temporară, cazul intră pe backoff, iar
+        agentul rămâne pornit și colectează local.
+        """
+        for body in self.NON_OBJECT_BODIES:
+            with self.subTest(body=body):
+                with self.assertRaises(TransportError) as raised:
+                    handle_response(_raw_response(200, body))
+
+                self.assertNotIsInstance(raised.exception, FatalTransportError)
+
+    def test_a_non_object_body_is_named_as_a_malformed_response(self) -> None:
+        """
+        Dispatcher-ul de evenimente se sprijină pe clasa exactă: doar
+        MalformedResponseError înseamnă „acceptat, dar corp inutilizabil".
+        """
+        for body in self.NON_OBJECT_BODIES:
+            with self.subTest(body=body):
+                with self.assertRaises(MalformedResponseError):
+                    handle_response(_raw_response(200, body))
+
+    def test_a_200_that_is_not_json_is_not_a_malformed_response(self) -> None:
+        """
+        Contra-testul clasei: HTML de la un portal captiv nu vine de la serverul
+        EDR, deci nu are voie să ajungă pe calea de „livrat".
+        """
+        with self.assertRaises(TransportError) as raised:
+            handle_response(_raw_response(200, b"<html>login</html>"))
+
+        self.assertNotIsInstance(raised.exception, MalformedResponseError)
+
+    def test_a_200_with_an_object_is_returned_unchanged(self) -> None:
+        """Contra-testul: verificarea de formă nu atinge răspunsurile corecte."""
+        body = {"status": "ok", "directive": {"action": "none"}}
+
+        self.assertEqual(
+            handle_response(_raw_response(200, json.dumps(body).encode("utf-8"))),
+            body,
+        )
+
+
 class AuthHeaderTests(unittest.TestCase):
     def test_headers_carry_the_names_the_server_expects(self) -> None:
         headers = transport.build_auth_headers("k", "s")
@@ -264,6 +345,48 @@ class DispatcherQueueTests(unittest.TestCase):
             dispatcher._dispatch_batch()
 
         self.assertEqual(spool.marked_sent, [1])
+
+    def test_a_2xx_with_a_non_object_body_counts_as_delivered(self) -> None:
+        """
+        Comportamentul de dinainte de verificarea de formă, păstrat deliberat.
+
+        Răspunsul trece prin handle_response-ul real, ca testul să depindă de
+        clasa ridicată efectiv de transport, nu de una aleasă de test. Două
+        evenimente, ca să se vadă că lotul merge mai departe: un eveniment
+        reținut aici ar bloca tot ce vine după el.
+        """
+        spool = FakeSpool([{"n": 1}, {"n": 2}])
+        dispatcher = _make_dispatcher(spool, FakeStopEvent(trip_after_waits=1))
+
+        def accepted_with_unusable_body(server_url, payload, agent_key=None):
+            return handle_response(_raw_response(200, b"[]"))
+
+        with patch("services.event_dispatcher.send_event", accepted_with_unusable_body):
+            dispatched = dispatcher._dispatch_batch()
+
+        self.assertEqual(dispatched, 2)
+        self.assertEqual(spool.marked_sent, [1, 2])
+        self.assertEqual(
+            spool.recorded_attempts,
+            [],
+            "Serverul a acceptat evenimentul (2xx), dar dispatcher-ul l-a "
+            "păstrat pentru retrimitere: coada se blochează și apar duplicate.",
+        )
+
+    def test_a_2xx_that_is_not_json_keeps_the_event_queued(self) -> None:
+        """Perechea: un 200 în HTML nu confirmă livrarea, deci evenimentul rămâne."""
+        spool = FakeSpool([{"n": 1}])
+        dispatcher = _make_dispatcher(spool, FakeStopEvent(trip_after_waits=1))
+
+        def captive_portal(server_url, payload, agent_key=None):
+            return handle_response(_raw_response(200, b"<html>login</html>"))
+
+        with patch("services.event_dispatcher.send_event", captive_portal):
+            dispatched = dispatcher._dispatch_batch()
+
+        self.assertEqual(dispatched, 0)
+        self.assertEqual(spool.marked_sent, [])
+        self.assertEqual(spool.recorded_attempts, [1])
 
     def test_an_auth_failure_stops_the_batch_instead_of_burning_through_it(self) -> None:
         """

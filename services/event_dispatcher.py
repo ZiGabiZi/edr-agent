@@ -36,6 +36,13 @@ Politica de erori — cheia întregii corecturi:
         invalid). Este eliminat individual și logat ca eroare, altfel ar
         bloca la nesfârșit restul cozii (problema clasică "poison message").
 
+    MalformedResponseError (2xx, dar corpul JSON nu e obiect):
+        Evenimentul se consideră LIVRAT. Codul 2xx confirmă acceptarea, iar
+        dispatcher-ul nu folosește corpul la nimic. Retrimiterea ar bloca
+        coada în spatele unui eveniment pe care serverul îl are deja și ar
+        produce duplicate. Cazul se loghează la WARNING. Un 2xx care nu e JSON
+        deloc rămâne TransportError simplu: nu confirmă livrarea.
+
 De ce eșecurile de autentificare NU golesc coada, nici măcar cu plafon:
     Criteriul de eliminare e „proprietate a mesajului". Un payload invalid e
     stricat oricând l-ai trimite; un 401 descrie relația agent–server la
@@ -67,6 +74,7 @@ from services.transport import (
     AuthenticationError,
     FatalTransportError,
     IdentityMismatchError,
+    MalformedResponseError,
     TransportError,
     send_event,
 )
@@ -220,9 +228,25 @@ class EventDispatcher(threading.Thread):
                 break
 
             try:
-                response = send_event(
-                    self.server_url, event_payload, agent_key=self.agent_key
-                )
+                # try-ul interior nu e un except separat, deliberat: un 2xx cu
+                # corp malformat trebuie să treacă prin EXACT aceeași cale de
+                # succes ca un 2xx normal (mark_sent, contor, resetarea
+                # backoff-ului și a alarmei). O copie a acestor linii într-o
+                # ramură proprie s-ar putea desincroniza tăcut de original,
+                # cum s-a întâmplat cu cele două căi de reînregistrare (#10, #11).
+                try:
+                    response = send_event(
+                        self.server_url, event_payload, agent_key=self.agent_key
+                    )
+                except MalformedResponseError as error:
+                    self.logger.warning(
+                        "Spooled event id=%d accepted by server, but the response "
+                        "body is unusable (%s). Treating it as delivered.",
+                        row_id,
+                        error,
+                    )
+                    response = None
+
                 self.spool.mark_sent(row_id)
                 sent_count += 1
                 self._backoff.record_success()

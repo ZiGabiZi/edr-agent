@@ -24,11 +24,13 @@ De ce există acest fișier:
 import threading
 import unittest
 from contextlib import contextmanager, ExitStack
-from unittest.mock import patch
+from typing import cast
+from unittest.mock import MagicMock, patch
 
 import agent
 from services.incarnation import process_instance_id
-from services.transport import TransportError, AgentNotRegisteredError
+from services.transport import TransportError, AgentNotRegisteredError, handle_response
+from tests.test_api_authentication import _raw_response
 from tests.wire_contract import declared_fields
 
 
@@ -656,6 +658,113 @@ class HeartbeatLoopReregistrationTests(unittest.TestCase):
             "dintre ele nu se execută niciodată contra serverului actual, deci "
             "diferența nu ar apărea în nicio rulare reală.",
         )
+
+
+class HeartbeatMalformedResponseTests(unittest.TestCase):
+    """
+    Un răspuns de formă greșită nu are voie să oprească agentul.
+
+    Canalul de comandă e intrare neîncrezută (agent.py,
+    _is_usable_heartbeat_interval). Garda de cadență nu ajuta la nimic dacă
+    răspunsul era o listă: response.get(...) arunca AttributeError cu două
+    linii înainte, iar excepția ieșea din buclă până în run_agent, care oprea
+    tot agentul. Cele două teste acoperă cele două niveluri ale aceluiași
+    defect: corpul care nu e obiect și directiva care nu e obiect.
+    """
+
+    NORMAL_INTERVAL = 10
+    SERVER_INTERVAL = 42
+
+    def test_a_non_object_body_backs_off_instead_of_stopping_the_loop(self) -> None:
+        """
+        Primul heartbeat trece prin handle_response-ul real, nu printr-o excepție
+        aruncată de test. Așa testul leagă bucla de verificarea din transport:
+        dacă parse_json_response ar întoarce din nou [], bucla ar primi lista,
+        iar AttributeError ar ieși din heartbeat_loop și ar pica testul.
+        """
+        stop_event = _RecordingStopEvent()
+        attempts = {"count": 0}
+
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
+            attempts["count"] += 1
+
+            if attempts["count"] == 1:
+                return handle_response(_raw_response(200, b"[]"))
+
+            stop_event.set()
+            return {"status": "ok", DIRECTIVE_FIELD: {DIRECTIVE_ACTION_FIELD: "none"}}
+
+        with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event):
+            agent.heartbeat_loop(
+                config=_make_config(),
+                server_url="http://127.0.0.1:8000",
+                system_info={},
+                heartbeat_interval_seconds=self.NORMAL_INTERVAL,
+                stop_event=stop_event,
+            )
+
+        self.assertEqual(
+            attempts["count"],
+            2,
+            "Bucla nu a mai trimis al doilea heartbeat după un corp [].",
+        )
+
+    def test_a_malformed_directive_is_ignored_and_the_rest_is_still_read(self) -> None:
+        """
+        Membrul interesant al listei este șirul "reregister". E truthy, deci
+        vechiul `or {}` nu îl înlocuia, iar "reregister".get(...) arunca. Orice
+        variantă care ar „repara" asta citind șirul ca acțiune ar da unui
+        răspuns malformat puterea de a declanșa reînregistrarea.
+
+        Restul răspunsului rămâne valid, deci cadența dictată trebuie adoptată
+        în continuare: o directivă stricată nu are voie să anuleze tot
+        răspunsul. Warning-ul păstrează decizia vizibilă, după modelul lui
+        next_heartbeat_seconds. Absența directivei e inclusă pentru că
+        contractul o declară obligatorie (heartbeat_response.required).
+        """
+        for malformed in ("reregister", ["reregister"], 42, True, None):
+            with self.subTest(directive=malformed):
+                stop_event = _RecordingStopEvent()
+
+                def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
+                    stop_event.set()
+                    return {
+                        "status": "ok",
+                        "agent_id": agent_id,
+                        DIRECTIVE_FIELD: malformed,
+                        NEXT_INTERVAL_FIELD: self.SERVER_INTERVAL,
+                    }
+
+                with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event), \
+                        patch.object(agent, "register_agent_with_retry") as reregister:
+                    # agent.logger este, în interiorul harness-ului, mock-ul pus de el.
+                    # Pylance vede doar declarația din agent.py (logging.Logger),
+                    # unde .warning e o metodă fără call_args_list; cast-ul îi
+                    # spune ce obiect stă acolo la rulare. Nu schimbă nimic la
+                    # execuție.
+                    logger = cast(MagicMock, agent.logger)
+                    agent.heartbeat_loop(
+                        config=_make_config(),
+                        server_url="http://127.0.0.1:8000",
+                        system_info={},
+                        heartbeat_interval_seconds=self.NORMAL_INTERVAL,
+                        stop_event=stop_event,
+                    )
+
+                reregister.assert_not_called()
+                self.assertEqual(
+                    stop_event.wait_timeouts,
+                    [self.SERVER_INTERVAL],
+                    "Directiva malformată a anulat și cadența dictată de server.",
+                )
+                self.assertTrue(
+                    any(
+                        "malformed directive" in str(call.args[0])
+                        for call in logger.warning.call_args_list
+                    ),
+                    "Directiva a fost ignorată tăcut: nimic din log nu arată că "
+                    "serverul a trimis ceva ce agentul a refuzat.",
+                )
 
 
 if __name__ == "__main__":
