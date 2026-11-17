@@ -275,6 +275,27 @@ def _monitoring_not_wired() -> str:
     return MONITORING_MONITOR_UNAVAILABLE
 
 
+def acknowledge_monitoring_delivery(
+    file_monitor: Optional[FileMonitor], delivered_state: str
+) -> None:
+    """
+    Serverul a primit un heartbeat cu delivered_state: zăvorul pierderilor
+    se poate deschide.
+
+    Doar pentru "partial". Starea asta e singura care raportează pierderile
+    și singura care vine după evaluarea zăvorului (assess_monitoring cheamă
+    covers_all_directories() ultimul). Un "stopped" livrat nu spune nimic
+    despre pierderile din zăvor. Mai mult, evaluarea notată atunci poate veni
+    de la un heartbeat mai vechi, care a eșuat.
+    """
+    if file_monitor is not None and delivered_state == MONITORING_PARTIAL:
+        file_monitor.acknowledge_reported_losses()
+
+
+def _no_monitoring_acknowledgement(delivered_state: str) -> None:
+    """Perechea lui _monitoring_not_wired: fără monitor nu e zăvor de deschis."""
+
+
 def build_heartbeat_payload(
     config: Dict[str, Any], sequence: int, monitoring: str
 ) -> Dict[str, Any]:
@@ -720,9 +741,16 @@ def heartbeat_loop(
     stop_event: StopSignal,
     credentials: Optional[AgentCredentials] = None,
     monitoring_state: Callable[[], str] = _monitoring_not_wired,
+    monitoring_delivered: Callable[[str], None] = _no_monitoring_acknowledgement,
 ) -> None:
     """
     Rulează bucla principală a agentului cu exponential backoff și sleep responsiv.
+
+    monitoring_state evaluează starea înainte de trimitere. monitoring_delivered
+    primește starea doar după ce serverul a înregistrat heartbeat-ul. Un
+    heartbeat eșuat sau unul la care serverul nu-l mai are pe agent în
+    registru nu confirmă nimic, deci o pierdere de director raportată în el
+    pleacă din nou cu heartbeat-ul următor.
 
     Diferența față de implementarea anterioară cu time.sleep():
         stop_event.wait(timeout=N) are semantică identică cu time.sleep(N) în
@@ -804,6 +832,12 @@ def heartbeat_loop(
             )
             logger.info(f"Heartbeat response: {response}")
             auth_alarm.record_success()
+
+            # "unregistered" ajunge pe server, dar acolo nu există agent pe
+            # care să se înregistreze tranziția (app/routes/heartbeat.py).
+            # Confirmarea așteaptă primul heartbeat de după reînregistrare.
+            if response.get("status") != "unregistered":
+                monitoring_delivered(monitoring)
 
             directive = response.get("directive")
             if not isinstance(directive, dict):
@@ -1119,6 +1153,9 @@ def run_agent() -> None:
                 # citește doar ca să evalueze firele la fiecare heartbeat.
                 monitoring_state=lambda: assess_monitoring(
                     event_spool, file_monitor, event_dispatcher
+                ),
+                monitoring_delivered=lambda state: acknowledge_monitoring_delivery(
+                    file_monitor, state
                 ),
             )
 

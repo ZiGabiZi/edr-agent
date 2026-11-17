@@ -409,11 +409,20 @@ class FileMonitor:
         # deosebește de cel programat.
         self._identity_for_directory: dict = {}
 
-        # Pierderile pe care niciun heartbeat nu le-a raportat încă. Firul de
+        # Zăvorul pierderilor pe care serverul nu le-a primit încă. Firul de
         # recuperare poate repune un director șters și recreat înainte de
-        # heartbeat-ul următor; fără zăvorul ăsta, pierderea n-ar lăsa nicio
-        # urmă pe server. covers_all_directories() îl golește când raportează.
-        self._unreported_losses: set = set()
+        # heartbeat-ul următor; fără zăvor, pierderea n-ar lăsa nicio urmă pe
+        # server. Două contoare, nu un set: fiecare pierdere nouă crește
+        # _losses_recorded, iar _losses_acknowledged ține minte până unde a
+        # confirmat bucla de heartbeat livrarea. Zăvorul e închis cât timp
+        # diferă. _losses_in_report e cât a văzut ultima evaluare, adică exact
+        # ce a plecat în heartbeat-ul care se trimite acum. O pierdere apărută
+        # în timpul trimiterii are număr mai mare și rămâne în zăvor după
+        # confirmare. Un set de nume de directoare ar pierde-o când același
+        # director se pierde a doua oară înainte de confirmare.
+        self._losses_recorded = 0
+        self._losses_acknowledged = 0
+        self._losses_in_report = 0
 
         # Hărțile de mai sus le scrie firul de recuperare și le citește firul
         # de heartbeat. Reentrant, pentru că trecerea de recuperare cheamă
@@ -446,7 +455,9 @@ class FileMonitor:
         self._watch_for_directory = {}
         self._reported_lost_directories = set()
         self._identity_for_directory = {}
-        self._unreported_losses = set()
+        self._losses_recorded = 0
+        self._losses_acknowledged = 0
+        self._losses_in_report = 0
         self._recovery_stop.clear()
 
         for directory in self.monitored_directories:
@@ -589,8 +600,9 @@ class FileMonitor:
            programat din nou. Un director șters și recreat, sau mutat și
            înlocuit, între două treceri parcurge ambii pași în aceeași trecere.
 
-        Pierderea rămâne în zăvorul _unreported_losses până o raportează un
-        heartbeat, chiar dacă directorul e deja recuperat.
+        Pierderea rămâne în zăvor până confirmă bucla de heartbeat că un
+        heartbeat care o raporta a ajuns pe server, chiar dacă directorul e
+        deja recuperat (acknowledge_reported_losses()).
 
         Metoda este publică și apelabilă direct din teste, ca
         SettleReleaser.release_due_once(): firul dă doar cadența.
@@ -800,7 +812,7 @@ class FileMonitor:
         Heartbeat-ul vede pierderea aici imediat; firul de recuperare scoate
         apoi directorul de sub observer (unwatched_directories) și îl
         programează din nou când reapare. Prima detecție a unei pierderi intră
-        și în zăvorul _unreported_losses.
+        și în zăvor (_losses_recorded).
         """
         with self._coverage_lock:
             lost = [
@@ -815,7 +827,7 @@ class FileMonitor:
             for directory in lost:
                 if directory not in self._reported_lost_directories:
                     self._reported_lost_directories.add(directory)
-                    self._unreported_losses.add(directory)
+                    self._losses_recorded += 1
                     self.logger.warning(
                         "Monitored directory is no longer watched (deleted, "
                         "moved or its watcher stopped): %s. Heartbeat reports "
@@ -833,23 +845,41 @@ class FileMonitor:
         Trei părți: unwatched_directories (lipsea la pornire, sau firul de
         recuperare l-a scos după ce s-a pierdut), lost_directories() (s-a
         pierdut după ultima trecere a firului de recuperare) și zăvorul
-        _unreported_losses. Primele două se golesc singure când directorul
+        pierderilor nelivrate. Primele două se golesc singure când directorul
         reapare, în cel mult recovery_poll_seconds.
 
         Zăvorul face ca orice pierdere să ajungă pe server, oricât de scurtă:
         un director șters și recreat între două heartbeat-uri e recuperat
-        înainte ca vreun heartbeat să-l vadă lipsă. Apelul CONSUMĂ zăvorul,
-        deci îl face heartbeat-ul (agent.py::assess_monitoring): un rezultat
-        False raportează toate pierderile de până acum, iar următorul apel
-        poate întoarce True.
+        înainte ca vreun heartbeat să-l vadă lipsă.
+
+        Apelul NU golește zăvorul, doar notează cât a văzut. Înainte îl golea,
+        deci un heartbeat care raporta "partial" și apoi eșua la trimitere
+        lua pierderea cu el, iar următorul raporta "active": serverul nu afla
+        nimic. Acum zăvorul se deschide abia când bucla de heartbeat confirmă
+        livrarea (acknowledge_reported_losses()). Până atunci, fiecare
+        evaluare întoarce False.
         """
         with self._coverage_lock:
             # lost_directories() întâi: poate adăuga în zăvor o pierdere nouă,
             # pe care rezultatul de acum o și raportează.
             complete = not self.lost_directories() and not self.unwatched_directories
-            had_unreported_losses = bool(self._unreported_losses)
-            self._unreported_losses.clear()
-            return complete and not had_unreported_losses
+            self._losses_in_report = self._losses_recorded
+            return complete and self._losses_recorded == self._losses_acknowledged
+
+    def acknowledge_reported_losses(self) -> None:
+        """
+        Deschide zăvorul pentru pierderile pe care le-a văzut ultima evaluare.
+
+        O cheamă bucla de heartbeat, doar după ce serverul a primit un
+        heartbeat cu monitoring="partial" (agent.py::
+        acknowledge_monitoring_delivery). Rămân în zăvor pierderile apărute
+        după evaluare, cât timp heartbeat-ul era pe drum: niciun heartbeat
+        livrat nu le-a raportat încă.
+        """
+        with self._coverage_lock:
+            self._losses_acknowledged = max(
+                self._losses_acknowledged, self._losses_in_report
+            )
 
     def is_running(self) -> bool:
         """Returnează dacă observer-ul de monitorizare este activ."""

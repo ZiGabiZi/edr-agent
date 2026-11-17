@@ -28,6 +28,7 @@ from unittest.mock import patch
 import agent
 from services.event_spool import EventSpoolError
 from services.file_monitor import FileMonitor
+from services.transport import TransportError
 from tests import test_agent_startup as startup
 from tests.test_heartbeat_payload import _loop_isolated_from_the_network, _make_config
 
@@ -348,6 +349,8 @@ class DirectoryRecoveryTests(unittest.TestCase):
 
         shutil.rmtree(self.doomed)
         self.assertTrue(_wait_for(lambda: not monitor.covers_all_directories()))
+        # Heartbeat-ul care a raportat pierderea a ajuns pe server.
+        monitor.acknowledge_reported_losses()
         self.assertTrue(_wait_for(lambda: self.doomed in monitor.unwatched_directories))
 
         os.mkdir(self.doomed)
@@ -371,8 +374,8 @@ class DirectoryRecoveryTests(unittest.TestCase):
         """
         Șters și recreat, apoi recuperat, fără ca vreun heartbeat să-l vadă
         lipsă. Fără zăvor, heartbeat-ul următor ar spune "active", iar
-        pierderea n-ar lăsa nicio urmă pe server. Raportată o dată, apoi
-        starea revine.
+        pierderea n-ar lăsa nicio urmă pe server. Raportată și livrată o
+        dată, apoi starea revine.
         """
         monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
         self._wait_for_dead_emitter_after_rmtree(monitor)
@@ -380,6 +383,7 @@ class DirectoryRecoveryTests(unittest.TestCase):
         monitor.recover_directories_once()
 
         self.assertEqual(_assess(object(), monitor, _Alive()), "partial")
+        agent.acknowledge_monitoring_delivery(monitor, "partial")
         self.assertEqual(_assess(object(), monitor, _Alive()), "active")
 
     def test_a_directory_moved_and_replaced_between_two_passes_is_lost(self) -> None:
@@ -400,6 +404,7 @@ class DirectoryRecoveryTests(unittest.TestCase):
         old_emitter.join(timeout=5)
         self.assertFalse(old_emitter.is_alive())
         self.assertEqual(_assess(object(), monitor, _Alive()), "partial")
+        agent.acknowledge_monitoring_delivery(monitor, "partial")
         self.assertEqual(_assess(object(), monitor, _Alive()), "active")
         self._assert_files_are_reported_from(self.doomed)
 
@@ -448,6 +453,7 @@ class DirectoryRecoveryTests(unittest.TestCase):
         self.assertEqual(monitor.recover_directories_once(), [self.doomed])
         # Prima evaluare raportează pierderea pe care n-a văzut-o niciun heartbeat.
         self.assertFalse(monitor.covers_all_directories())
+        monitor.acknowledge_reported_losses()
         self.assertTrue(monitor.covers_all_directories())
 
     def test_the_recovery_is_logged_and_a_second_loss_is_logged_again(self) -> None:
@@ -474,6 +480,155 @@ class DirectoryRecoveryTests(unittest.TestCase):
         os.mkdir(self.late)
 
         self.assertEqual(monitor.recover_directories_once(), [])
+
+
+_DELIVERED = {"status": "ok", "directive": {"action": "none"}}
+
+
+class LossDeliveryTests(unittest.TestCase):
+    """
+    Zăvorul pierderilor se deschide la livrare, nu la evaluare.
+
+    Înainte, covers_all_directories() golea zăvorul chiar când se construia
+    heartbeat-ul. Dacă trimiterea eșua, o pierdere scurtă, deja recuperată,
+    nu mai ajungea pe server: heartbeat-ul următor spunea "active", iar nota
+    v11 din contract („oricât de scurtă a fost pierderea") nu mai era adevărată.
+
+    Pe FileMonitor real și pe disc real. Cadența lungă face ca fiecare trecere
+    de recuperare să fie exact una, chemată din test.
+    """
+
+    def setUp(self) -> None:
+        self.root = tempfile.TemporaryDirectory()
+        self.kept = os.path.join(self.root.name, "kept")
+        self.doomed = os.path.join(self.root.name, "doomed")
+        os.mkdir(self.kept)
+        os.mkdir(self.doomed)
+        self.monitor = FileMonitor(
+            agent_id="agent-test",
+            agent_instance_id="11111111-2222-3333-4444-555555555555",
+            monitored_directories=[self.kept, self.doomed],
+            recursive_monitoring=False,
+            event_callback=lambda payload: None,
+            logger=_SILENT,
+            recovery_poll_seconds=3600,
+        )
+        self.monitor.start()
+
+    def tearDown(self) -> None:
+        self.monitor.stop()
+        self.monitor.join(timeout=5)
+        self.root.cleanup()
+
+    def _lose_and_recover(self) -> None:
+        """O pierdere pe care niciun heartbeat n-o vede: la evaluare, zona e întreagă."""
+        emitter = self.monitor._emitter_for_directory[self.doomed]
+        shutil.rmtree(self.doomed)
+        emitter.join(timeout=5)
+        self.assertFalse(emitter.is_alive())
+        os.mkdir(self.doomed)
+        self.assertEqual(self.monitor.recover_directories_once(), [self.doomed])
+
+    def _state(self) -> str:
+        return _assess(object(), self.monitor, _Alive())
+
+    def _deliver(self, state: str) -> None:
+        agent.acknowledge_monitoring_delivery(self.monitor, state)
+
+    def _run_loop(self, replies: list) -> list:
+        """
+        heartbeat_loop cu monitorul real legat ca în run_agent. Fiecare
+        răspuns din replies e fie corpul întors, fie excepția ridicată de
+        send_heartbeat. Întoarce câmpul monitoring al fiecărei încercări.
+        """
+        stop_event = threading.Event()
+        sent: list = []
+        pending = iter(replies)
+
+        def fake_send_heartbeat(server_url, agent_id, heartbeat_payload, agent_key=None):
+            sent.append(heartbeat_payload["monitoring"])
+            reply = next(pending)
+            if len(sent) == len(replies):
+                stop_event.set()
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        with _loop_isolated_from_the_network(fake_send_heartbeat, stop_event):
+            agent.heartbeat_loop(
+                config=_make_config(),
+                server_url="http://127.0.0.1:8000",
+                system_info={},
+                heartbeat_interval_seconds=0.01,
+                stop_event=stop_event,
+                monitoring_state=self._state,
+                monitoring_delivered=self._deliver,
+            )
+
+        return sent
+
+    def test_an_undelivered_loss_is_reported_again(self) -> None:
+        self._lose_and_recover()
+
+        self.assertEqual(self._state(), "partial")
+        # Heartbeat-ul acela n-a ajuns: nicio confirmare, deci tot "partial".
+        self.assertEqual(self._state(), "partial")
+
+        self._deliver("partial")
+        self.assertEqual(self._state(), "active")
+
+    def test_a_loss_during_delivery_survives_the_acknowledgement(self) -> None:
+        """
+        Același director se pierde din nou cât timp heartbeat-ul e pe drum.
+        Confirmarea acoperă doar ce a văzut evaluarea, nu și pierderea nouă.
+        Un set de nume de directoare ar fi șters-o pe amândouă deodată.
+        """
+        self._lose_and_recover()
+        self.assertEqual(self._state(), "partial")
+
+        self._lose_and_recover()
+        self._deliver("partial")
+
+        self.assertEqual(self._state(), "partial")
+        self._deliver("partial")
+        self.assertEqual(self._state(), "active")
+
+    def test_only_a_delivered_partial_opens_the_latch(self) -> None:
+        """
+        Un "stopped" livrat nu spune nimic despre pierderile din zăvor, iar
+        evaluarea notată poate veni de la un heartbeat mai vechi, care a eșuat.
+        """
+        self._lose_and_recover()
+        self.assertEqual(self._state(), "partial")
+
+        for state in ("active", "stopped", "spool_unavailable", "monitor_unavailable"):
+            self._deliver(state)
+
+        self.assertEqual(self._state(), "partial")
+
+    def test_acknowledging_without_a_monitor_does_nothing(self) -> None:
+        agent.acknowledge_monitoring_delivery(None, "partial")
+
+    def test_a_failed_heartbeat_does_not_swallow_a_short_loss(self) -> None:
+        """Cazul găsit pe 17 noiembrie 2026, cap la cap prin bucla reală."""
+        self._lose_and_recover()
+
+        sent = self._run_loop([TransportError("server down"), _DELIVERED, _DELIVERED])
+
+        self.assertEqual(sent, ["partial", "partial", "active"])
+
+    def test_an_unregistered_reply_does_not_swallow_a_short_loss(self) -> None:
+        """
+        Răspunsul ajunge, dar serverul nu mai are agentul în registru, deci
+        nu are pe ce agent să înregistreze tranziția.
+        """
+        self._lose_and_recover()
+        unregistered = {"status": "unregistered", "directive": {"action": "reregister"}}
+
+        with patch.object(agent, "register_agent_with_retry", return_value=True):
+            sent = self._run_loop([unregistered, _DELIVERED, _DELIVERED])
+
+        self.assertEqual(sent, ["partial", "partial", "active"])
 
 
 class PipelineAliveTests(unittest.TestCase):
@@ -582,6 +737,11 @@ class RunAgentWiringTests(unittest.TestCase):
     """
 
     def _monitoring_reported_by_run_agent(self, spool_factory, start_monitoring) -> str:
+        return self._heartbeat_kwargs_from_run_agent(
+            spool_factory, start_monitoring
+        )["monitoring_state"]()
+
+    def _heartbeat_kwargs_from_run_agent(self, spool_factory, start_monitoring) -> dict:
         journal: list = []
         stop_event = startup.FakeStopEvent(trip_after_waits=5)
 
@@ -593,7 +753,7 @@ class RunAgentWiringTests(unittest.TestCase):
             agent.run_agent()
 
         heartbeat_mock.assert_called_once()
-        return heartbeat_mock.call_args.kwargs["monitoring_state"]()
+        return heartbeat_mock.call_args.kwargs
 
     def test_a_spool_that_does_not_open_is_reported(self) -> None:
         def failing_spool(journal):
@@ -616,6 +776,18 @@ class RunAgentWiringTests(unittest.TestCase):
             ),
             "monitor_unavailable",
         )
+
+    def test_the_delivery_acknowledgement_is_wired(self) -> None:
+        """Fără ea, zăvorul nu s-ar mai deschide și agentul ar rămâne "partial"."""
+        kwargs = self._heartbeat_kwargs_from_run_agent(
+            lambda journal: (lambda **kwargs: startup.FakeSpool(journal)),
+            lambda config, callback: None,
+        )
+
+        delivered = kwargs.get("monitoring_delivered")
+        self.assertIsNotNone(delivered)
+        self.assertIsNot(delivered, agent._no_monitoring_acknowledgement)
+        delivered("partial")
 
 
 if __name__ == "__main__":
