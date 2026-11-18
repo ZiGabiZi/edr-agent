@@ -21,6 +21,28 @@ secțiune a **acestui** document. O secțiune din alt contract se scrie califica
 Fără prefix, `§2.1` ar însemna două lucruri diferite în aceeași frază — iar
 numerotarea lucrării se mută la fiecare secțiune inserată, a celui de aici nu.
 
+**Ce e livrat și ce e doar definit** (18 noiembrie 2026). Regula de aur cere ca
+definiția să vină înaintea mecanismului, deci documentul conține și metrici
+care încă nu au cod. Tabelul spune care sunt care, ca o definiție să nu fie
+citită drept rezultat.
+
+| Secțiune | Stadiu |
+|---|---|
+| §1–§2.2 octetul divulgat, numitorul, golurile, concentrarea | livrat; cifra în `GET /api/metrics/disclosure` |
+| §3.1 costul marginal per endpoint | definit; măsurătoarea pe parc (etapa 2.5) nu s-a făcut |
+| §3.2 mediana și p95 per fișier | definit; plicul per eveniment e consemnat, dar distribuția nu se calculează nicăieri |
+| §3.3 media și raportul agregat | raportul agregat livrat (`ratio`); media per endpoint nu se publică separat |
+| §3.4 atribuirea pe trepte | livrat, cu o singură treaptă existentă, T0 |
+| §3.5 dispoziția de la T0 | livrat (P2.3) |
+| §3.6 prevalența în parc | livrat (P2.4) |
+| §3.7 banda minimă la T0 | livrat (P2.6), fără escaladare reală |
+| §4 oracolul, categoriile, frontiera | definit; niciun motor de analiză nu există încă |
+| §5 rata de detecție | definit; depinde de oracol |
+| §6 costul observației | `settle_wait_ms` și `hash_duration_ms` livrate; latența per treaptă nu există fără trepte |
+| §7 precizia numărătorului | livrat (pașii 1.3a, 1.3b), cu stadiul la §7.5 |
+| §8 ce se declară lângă cifră | parțial automat: blocurile `run`, `reputation`, `prevalence`, `band`; restul se declară de mână |
+| §9 rularea de măsurătoare | livrat (pasul 1.4) |
+
 ---
 
 ## 1. Octetul divulgat
@@ -38,7 +60,7 @@ endpoint-ul de două ori, deci se numără de două ori.
 | Categorie | Se numără | Observație |
 |---|---|---|
 | Metadate de eveniment de fișier | da | plicul: identificatori, cale, amprentă, măsurători |
-| Metadate de eveniment de ciclu de viață | da | `agent_startup`, `_shutdown`, `_restart` — aceeași rețea |
+| Metadate de eveniment de ciclu de viață | da | `agent_startup`, `agent_shutdown` — aceeași rețea. `agent_restart` și `agent_monitoring_changed` nu: le creează serverul, din heartbeat, deci n-au traversat rețeaua ca eveniment |
 | Conținut divulgat la T2 | da | regiuni cerute de server |
 | Conținut divulgat la T3 | da | fișierul integral |
 | Retransmisii | da | vezi §1.3 |
@@ -50,13 +72,16 @@ endpoint-ul de două ori, deci se numără de două ori.
 și sunt identice sub ambele politici. Includerea lor ar adăuga aceeași constantă
 în numărător și numitor.
 
-**Traficul server→agent.** Rulesetul coborât, directivele, verdictele. Ele merg
-în direcția opusă și nu ating suprafața de atac descrisă în §L2.2. Costul lor se
-raportează separat, la §L2.8.
+**Traficul server→agent.** Rulesetul coborât, directivele, verdictele, iar azi
+blocurile `reputation` și `prevalence` din răspunsul la fiecare eveniment cu
+hash. Ele merg în direcția opusă și nu ating suprafața de atac descrisă în
+§L2.2. Costul lor aparține §L2.8, dar **azi nu se măsoară**: contabilizarea de
+pe server (`wire_accounting`) numără doar octeții primiți. Golul e declarat, nu
+rezolvat, și crește cu fiecare bloc adăugat pe răspuns.
 
 **Fișierele pe care agentul le-a citit local.** Un fișier de 200 MB hash-uit pe
 endpoint costă I/O, nu divulgare. Costul acela e o măsurătoare, nu un octet
-divulgat, și trăiește la §4.3.
+divulgat, și trăiește la §6.
 
 ### 1.3 Retransmisiile
 
@@ -274,7 +299,9 @@ a plecat din fișier până la verdict. Din P2.3 serverul conchide și el ceva l
 `unknown` a divulgat la T0 fără să se închidă acolo. Până la P2.3 fraza de mai
 sus n-avea niciun referent, fiindcă nimic nu măsura închiderea; de atunci are
 doi, iar orice cifră publicată sub numele „închis la T0" trebuie să spună care
-dintre cele două axe o produce.
+dintre cele două axe o produce. Dispoziția singură nu e o închidere: decizia de
+închidere la T0 e a benzii minime (P2.6, §3.7), care primește dispoziția și
+prevalența și publică tabelul ei separat.
 
 **Numitorul tabelului este mulțimea evenimentelor care poartă o treaptă**, nu
 mulțimea tuturor evenimentelor. Evenimentele de ciclu de viață (`agent_startup`,
@@ -513,8 +540,10 @@ celor 330 de mostre; `close_known` = plasările celor 575 de conținuturi din RD
 fișierul integral, adică sistemul rulat în modul `always_upload`.
 
 **Unde rulează.** Modul `always_upload` rulează **pe endpoint**, nu pe server.
-Rulesetul coboară deja (§L2.8), deci același motor poate fi alimentat cu fișierul
-integral acolo unde fișierul se află; peste fir trece doar verdictul.
+Prin proiectare rulesetul coboară pe endpoint (§L2.8), deci același motor poate fi
+alimentat cu fișierul integral acolo unde fișierul se află; peste fir trece doar
+verdictul. Azi niciun motor de analiză nu există în cod, nici pe agent, nici pe
+server: oracolul e o cerință de montaj, nu un mecanism livrat.
 
 Precizarea nu e detaliu de implementare, e precondiție de montaj. Un oracol
 calculat pe server ar cere ca fiecare fișier din corpus să ajungă acolo:
@@ -810,13 +839,15 @@ margini.
 |---|---|
 | `no_key` | cerere fără antet de cheie — tipic, o înrolare |
 | `unknown_key` | cheie prezentă, nerecunoscută — traficul care nu ajunge la nicio rută |
-| `no_instance` | agent cunoscut, încarnare nedeclarată — azi, re-înregistrarea |
+| `no_instance` | agent cunoscut, încarnare nedeclarată — azi doar un agent de dinainte de edr-agent#19 |
 | `unsized` | corp fără `Content-Length`; dimensiunea e **necunoscută, nu zero** |
 
 Motivele nu se contopesc. `unknown_key` e un agent cu credențiale stricate care
-divulgă tot ce trimite fără să scrie nimic nicăieri; `no_instance` e o
-consecință cunoscută a payload-ului de înregistrare. Într-un singur număr,
-niciunul n-ar mai fi lizibil.
+divulgă tot ce trimite fără să scrie nimic nicăieri; `no_instance` era
+consecința cunoscută a înregistrării, care pleca fără antet de încarnare până la
+edr-agent#19. De atunci agentul pune antetul la orice cerere, deci un
+`no_instance` nenul înseamnă un agent vechi sau un client care nu e agentul.
+Într-un singur număr, niciunul n-ar mai fi lizibil.
 
 Găleata apare **întreagă și când raportul e filtrat pe un agent**. Octeții de
 acolo n-au proprietar prin definiție: dacă s-ar putea filtra pe agent, n-ar mai
@@ -927,7 +958,7 @@ afara numărătorului măsurat: prima înrolare a unei mașini, și tot ce a tri
 agent înainte de ultima repornire a serverului. Amândouă se raportează, la
 `no_key` respectiv la `adoption`. Un numărător `measured` lângă un
 `unmeasured_before_adoption_bytes` nenul e incomplet, nu greșit — iar §8 cere ca
-diferența să fie declarată, nu presupusă. Un mesaj la fiecare repornire ar fi cerut.
+diferența să fie declarată, nu presupusă.
 
 Estimatorul din `disclosure_metrics.py::_payload_bytes` — reserializarea
 evenimentului stocat, cu câmpurile adăugate de server și fără anteturile HTTP —
@@ -1020,7 +1051,9 @@ greșit, iar responsabilitatea e a celui care a publicat-o.
   fiecărui agent
 - dacă numărătorul e măsurat sau estimat, și — când e estimat lângă o
   contabilizare nenulă — motivul (§7.5)
-- politica activă și calibrarea parametrului de cost
+- politica activă și calibrarea parametrului de cost; de la P2.6, politica
+  benzii minime (`band.declared_policy`), contorul `hold` și golul
+  `inherited_without_escalation` (§3.7)
 - pentru afirmații despre rate: marginea superioară din §4.3
 - **amprenta instantaneului de reputație**, sursele consultate cu versiunile
   lor, și **brațul ablației** — rece sau semiînzestrat (§8.1)
@@ -1063,7 +1096,7 @@ totuși declarația, iar unul care copiază cifra fără bloc se vede că a tăi
 
 Obligația nu dispare, se mută: ce nu poate spune serverul — distribuția de
 dimensiuni a corpusului, fracțiunea malițioasă, suprapunerea între endpoint-uri
-— rămâne de declarat de mână, în intrarea de tip `masuratoare` din jurnal.
+— rămâne de declarat de mână, în fișa de măsurătoare din jurnal (§9.2).
 
 ### 8.1 Depozitul de reputație
 
@@ -1160,19 +1193,29 @@ Două surse, amândouă necesare:
   fără nicio muncă în plus.
 - **dată de operator**, prin `POST /api/runs/{eticheta}`. E instrumentul.
 
-Eticheta de operator trebuie să fie **numele intrării de tip `masuratoare` din
+Eticheta de operator trebuie să fie **numele fișei de măsurătoare din
 jurnal**. Atunci legătura dintre ce s-a promis că se măsoară și ce date au ieșit
 devine verificabilă, nu declarată: oricine ia numele din jurnal, îl dă
 serverului și primește exact cifrele acelui experiment. Fără ea, legătura e pe
 încredere.
+
+**Ce înseamnă „jurnal" aici.** Documentația proiectului în care fișa de
+măsurătoare se scrie *înainte* de rulare: ce se măsoară, corpusul, ordinea de
+adăugare a endpoint-urilor, predicțiile. Până pe 13 noiembrie 2026 fișa era o
+intrare de tip `masuratoare` în repo-ul `edr-journal`, unde s-au pre-înregistrat
+corpusul și prevalența; de atunci documentația se ține în afara repo-urilor de
+cod. Regula nu se schimbă: eticheta rulării e numele fișei, iar fișa e scrisă
+înaintea rulării.
 
 Prefixul `auto-` e refuzat operatorului, ca întrebarea „cine a numit rularea" să
 aibă răspuns și peste șase luni.
 
 **O etichetă folosită o dată nu se mai poate redeschide.** E singurul mod în
 care mecanismul poate minți: date noi turnate în cifre deja citate, cu un
-răspuns care arată identic — același nume, alte numere. Aceeași regulă ca în
-jurnal, unde un commit de montaj nu se modifică prin `amend` sau `push --force`.
+răspuns care arată identic — același nume, alte numere. Aceeași regulă ca la
+fișa de măsurătoare, care nu se rescrie după rulare, și ca la commit-urile de
+montaj, care nu se modifică prin `amend` sau `push --force` după ce au fost
+publicate.
 Refuzul e 409, iar registrul etichetelor trăiește în aceeași bază cu
 evenimentele: în memorie s-ar fi golit exact la repornirea care face refolosirea
 probabilă.

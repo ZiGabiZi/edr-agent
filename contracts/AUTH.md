@@ -2,7 +2,9 @@
 
 Document valabil pentru ambele repo-uri (`edr-agent`, `edr-server`). Cele două
 exemplare trebuie să fie identice; sincronizarea lor este verificată de
-`test_the_peer_repository_carries_the_same_auth_document`.
+`test_the_peer_repository_carries_the_same_shared_document`, iar
+`test_the_peer_repository_has_committed_its_copy` cere ca și copia comisă din
+repo-ul pereche să fie aceeași.
 
 De ce aici și nu în `wire-contract.json`: acel fișier descrie **corpuri** —
 modele, câmpuri, obligativitate. Autentificarea trăiește în **antete**, pe care
@@ -17,6 +19,16 @@ contractul de fir nu le modelează. Un `Authorization` n-ar fi avut unde să
 |---|---|---|
 | `X-Agent-Key` | agentul | la fiecare scriere, și la re-înregistrare |
 | `X-Enrollment-Secret` | agentul | doar la prima înrolare |
+| `X-Enrollment-Secret` | operatorul | la rutele de operator: `POST /api/runs/{eticheta}` și `GET /api/agents/monitoring` |
+
+Al treilea rând e o reutilizare declarată, nu o scăpare: secretul de înrolare e
+singura credențială de nivel de operator care există. Un secret propriu de
+operator și de analist o înlocuiește odată cu închiderea rutelor de citire
+(edr-server#12, edr-server#9).
+
+Agentul mai trimite trei antete, `X-Agent-Wire-Attempted-Bytes`,
+`X-Agent-Wire-Delivered-Bytes` și `X-Agent-Instance-Id`. Nu autentifică nimic:
+sunt contabilitatea de fir, definite în `METRICS.md` §7.1.
 
 Numele sunt definite în două locuri care trebuie să coincidă:
 `edr-server/app/services/auth_service.py` și `edr-agent/services/transport.py`.
@@ -36,8 +48,12 @@ adevărul despre mecanism.
 | `/api/agents/register` | POST | secret de înrolare **sau** cheie de agent | cheia trebuie să fie a `agent_id`-ului cerut |
 | `/api/agents/{id}/heartbeat` | POST | cheie de agent | cheia trebuie să fie a lui `{id}` |
 | `/api/events` | POST | cheie de agent | cheia trebuie să fie a lui `agent_id` din corp |
+| `/api/runs/{eticheta}` | POST | secret de operator (azi, cel de înrolare) | eticheta nu poate fi refolosită (409) |
+| `/api/agents/monitoring` | GET | secret de operator (azi, cel de înrolare) | — |
 | `/api/agents` | GET | **nimic** | gaură cunoscută, vezi §6 |
 | `/api/events` | GET | **nimic** | gaură cunoscută, vezi §6 |
+| `/api/metrics/disclosure` | GET | **nimic** | gaură cunoscută, vezi §6 |
+| `/api/runs`, `/api/runs/current` | GET | **nimic** | gaură cunoscută, vezi §6 |
 
 Verificarea „cheia trebuie să fie a lui X" este pasul fără de care restul nu
 valorează mare lucru: altfel toți agenții sunt autentificați și oricare poate
@@ -148,8 +164,9 @@ Declarat explicit, nu presupus.
   evenimentelor circulă oricum în clar. Mecanismul apără împotriva unui client
   care nu are secretul, nu împotriva unui ascultător pe traseu. TLS e un pas
   separat, declarat pentru Etapa 6.
-- **Rutele de citire sunt deschise.** `GET /api/agents` și `GET /api/events` nu
-  cer nicio credențială. Analistul nu are încă un secret propriu — decizie
+- **Rutele de citire sunt deschise.** `GET /api/agents`, `GET /api/events`,
+  `GET /api/metrics/disclosure`, `GET /api/runs` și `GET /api/runs/current` nu
+  cer nicio credențială (edr-server#9). Analistul nu are încă un secret propriu — decizie
   luată explicit la închiderea proiectării Etapei 0. Ce garantează totuși
   proiectarea de acum: prin ele **nu se scurg credențiale**, pentru că depozitul
   de chei e separat de `agents_store`, iar cheile sunt stocate hash-uite.
@@ -194,9 +211,14 @@ Rotația și revocarea sunt operații explicite, făcute direct pe server:
 ```python
 from app.services import auth_service
 
-auth_service.revoke_agent_key("endpoint-01")   # invalidează imediat
+auth_service.revoke_agent_key("endpoint-01")   # scoate cheia din agent_keys.json
 auth_service.list_key_records()                # amprente, nu chei
 ```
+
+Revocarea rescrie fișierul imediat, dar un server care rulează deja ține cheile
+în memorie și citește fișierul o singură dată, la prima folosire. Rulată dintr-un
+proces separat, revocarea are deci efect abia după repornirea serverului
+(edr-server#10).
 
 Fișiere care nu au ce căuta în git sau în backup-uri partajate:
 `enrollment_secret.txt`, `agent_keys.json` (server), `agent_key`,

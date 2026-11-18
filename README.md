@@ -3,13 +3,24 @@
 Agentul care rulează pe endpoint și decide **ce anume merită să părăsească
 mașina**.
 
-Trimite amprente SHA-256 și metadate, niciodată conținut de fișier. Pe măsurarea
-de referință — 444 de fișiere, 143,1 MiB — asta a însemnat 264 KB în loc de 143
-MB, adică de aproximativ 567 de ori mai puțin. Cifra e calculată de
-[edr-server](https://github.com/ZiGabiZi/edr-server), care primește datele și
-contabilizează raportul.
+Trimite amprente SHA-256 și metadate, niciodată conținut de fișier. Pe prima
+măsurare, din 25–26 august 2026 — 444 de fișiere sintetice, 143,1 MiB — asta a
+însemnat 264 KB în loc de 143 MB, adică de aproximativ 567 de ori mai puțin.
+Cifra e calculată de [edr-server](https://github.com/ZiGabiZi/edr-server), care
+primește datele și contabilizează raportul, și e a definiției metricii de
+atunci: n-a fost recalculată de când numărătorul se măsoară pe fir, iar
+numitorul include și plicul.
 
 Lucrare de licență.
+
+**Unde a ajuns (18 noiembrie 2026).** Agentul observă directoarele configurate,
+calculează amprenta fiecărui fișier stabilizat și o livrează cu garanție
+*at-least-once*, autentificat cu cheia proprie. Pe heartbeat raportează dacă
+supravegherea e întreagă, iar în antete câți octeți a pus pe fir, ca serverul
+să poată verifica cifra. Toate evenimentele de fișier se opresc la treapta T0:
+agentul nu trimite încă nimic din conținut și nu răspunde la cereri de
+escaladare. Rulează pe cinci endpoint-uri Windows clonate, fiecare cu identitate
+proprie, înaintea măsurătorii pe parc.
 
 ---
 
@@ -63,6 +74,30 @@ malițios cunoscut.
 **Coada e pe disc, nu în memorie.** Un eveniment se șterge doar după confirmarea
 serverului. Server căzut, rețea picată, agent oprit brusc — evenimentele așteaptă
 și pleacă singure la reconectare.
+
+### Ce mai pleacă, în afară de evenimente
+
+**Heartbeat-ul spune dacă endpoint-ul chiar e supravegheat.** La fiecare
+heartbeat agentul verifică observer-ul, firele conductei și fiecare director
+configurat, și trimite câmpul `monitoring`: `active`, `partial` (o parte din
+directoare lipsește), `spool_unavailable`, `monitor_unavailable` sau `stopped`.
+Un director șters și recreat e pus singur înapoi sub observer, iar starea revine
+la `active` fără repornire. Fără câmpul ăsta, un agent viu cu conducta oprită ar
+arăta exact ca unul liniștit.
+
+**Antetele de fir.** Fiecare cerere poartă `X-Agent-Wire-Attempted-Bytes`,
+`X-Agent-Wire-Delivered-Bytes` și `X-Agent-Instance-Id`: câți octeți a predat
+agentul transportului și pentru câți a primit răspuns, de la pornirea procesului.
+Serverul le compară cu ce a primit el, ca cifra de divulgare să fie măsurată,
+nu estimată (`contracts/METRICS.md` §7).
+
+**Treapta de divulgare.** Fiecare eveniment de fișier poartă blocul
+`disclosure`, cu treapta la care s-a oprit (azi mereu `T0`) și octeții de
+conținut trimiși (azi mereu zero).
+
+Răspunsul serverului la un eveniment poartă dispoziția de reputație și
+prevalența conținutului în parc. Agentul le primește, dar nu le folosește încă:
+nu există nimic de făcut cu ele până la treapta T1.
 
 ---
 
@@ -142,6 +177,10 @@ Detalii despre credențiale: [contracts/AUTH.md](contracts/AUTH.md).
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
 ```
 
+Suita trece pe Python 3.14.6; pe endpoint-uri agentul se instalează cu aceeași
+versiune, într-un mediu virtual. `requirements.txt` fixează versiunile exacte,
+inclusiv dependențele lui `requests`.
+
 Configurarea nu vine gata din repo: `config.json` e ignorat de git, pentru că e
 fișierul unei mașini, nu al proiectului. Se naște din șablon:
 
@@ -162,7 +201,7 @@ Pune secretul de înrolare în `enrollment_secret`, apoi:
 .venv\Scripts\python.exe agent.py
 ```
 
-Testele — **198**, fără rețea și fără server:
+Testele — **318**, fără rețea și fără server:
 
 ```bash
 .venv\Scripts\python.exe -m unittest discover -s tests
@@ -195,8 +234,9 @@ secundă într-o buclă proprie, care după reparație a devenit ~170. Issue-ul 
 rescris cu cifrele, cu ipoteza inițială păstrată vizibil.
 
 Aceeași metodă a curățat payload-ul: măsurarea liniei de bază a arătat că cel mai
-scump câmp trimis la fiecare fișier — 16% din trafic — nu conținea nicio
-informație nouă. Scos, cu o gardă care îl împiedică să revină.
+scump câmp trimis la fiecare fișier, `description` — 16,7% din payload-ul unui
+eveniment —, nu conținea nicio informație nouă. Scos, cu o gardă care îl
+împiedică să revină, a scăzut metadatele totale cu 11%.
 
 **Comentariile explică ce s-ar strica altfel.** Multe docstring-uri conțin lanțul
 de eșec concret pe care linia respectivă îl previne, nu o parafrazare a codului.
@@ -205,7 +245,7 @@ de eșec concret pe care linia respectivă îl previne, nu o parafrazare a codul
 un plan de unsprezece scenarii: chei greșite, identități împrumutate, revocări,
 restarturi de server, payload-uri invalide injectate direct în coadă.
 
-70 de commituri, 15 issue-uri închise.
+La 18 noiembrie 2026: 21 de issue-uri închise și 2 deschise.
 
 ---
 
@@ -244,25 +284,34 @@ cunoscută:
 
 **Treapta următoare a protocolului.** Astăzi agentul trimite amprente
 *întotdeauna*. Treapta următoare înseamnă să răspundă la o cerere de escaladare:
-serverul constată că un fișier e necunoscut și cere conținutul lui. Canalul
-există deja ca formă — `collect_file_path` în directiva de heartbeat — dar
-agentul nu îl tratează.
+serverul constată că un fișier e necunoscut și cere ceva în plus despre el.
+Serverul decide deja, în banda minimă, care fișiere ar escalada, dar nu cere
+nimic, iar canalul există doar ca formă — `collect_file_path` în directiva de
+heartbeat, pe care agentul nu o tratează.
 
 **Reducerea numărului de evenimente.** Payload-ul a fost curățat cu 11% prin
 eliminarea unui câmp derivat. Pârghia rămasă nu mai e dimensiunea unui eveniment,
 ci câte se emit: un fișier scris de zece ori produce azi zece evenimente cu zece
-amprente identice.
+amprente identice. Serverul nu le numără ca zece mașini și nu le escaladează de
+zece ori, dar fiecare costă un plic pe fir.
+
+**Fișierele deja existente.** La pornire, ca și la repunerea unui director sub
+observer, agentul vede doar schimbările de acum încolo; ce era deja în director
+nu se raportează. Scanarea inițială e un pas viitor.
+
+**Ștergerile.** Agentul raportează crearea, modificarea și mutarea în zonă, dar
+nu ștergerea sau mutarea în afara ei.
 
 **TLS.** Cheia de API circulă în clar. Partea de agent nu e doar schimbarea
 schemei în URL: `requests` validează împotriva pachetului `certifi`, nu a
 magazinului de certificate al Windows-ului, deci un CA intern instalat prin
 politică de grup nu ar fi văzut. Iar un `SSLError` cade azi în eroarea de
 transport generică, adică e reîncercat ca o pană de rețea, deși un certificat
-invalid e ori configurare greșită, ori interpunere.
+invalid e ori configurare greșită, ori interpunere (edr-agent#15).
 
 **Plafonul cozii sub eșec prelungit de autentificare.** Coada crește deliberat
 nelimitat, dar plafonul general rămâne activ și elimină cele mai vechi intrări —
-adică exact începutul unui incident.
+adică exact începutul unui incident (edr-agent#17).
 
 **Debitul la cozi foarte adânci.** După reparația plafonului de hashing, la zece
 mii de intrări debitul scade de la ~170 la ~106 fișiere pe secundă: tracker-ul

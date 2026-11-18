@@ -16,6 +16,22 @@ secțiune a **acestui** document. O secțiune din alt contract se scrie califica
 Fără prefix, `§2.1` ar însemna două lucruri diferite în aceeași frază — iar
 numerotarea lucrării se mută la fiecare secțiune inserată, a celui de aici nu.
 
+**Stadiul (18 noiembrie 2026).** Specificația de mai jos a fost aplicată, iar
+corpusul e fixat și pre-înregistrat din 1 septembrie 2026, înaintea oricărei
+cifre (intrarea `2026-09-01-corpusul-fixat-inainte-de-masuratoare` din
+`edr-journal`):
+
+| Ce | Valoare fixată |
+|---|---|
+| fișiere | 1494: 700 de sistem, 300 de instalatoare, 164 compilate, 330 de mostre MalwareBazaar |
+| straturi (§2) | realist 1164 (77,9%), stres 330 (22,1%) |
+| repartiția (§6) | 1046 de fișiere pe toate cele 5 mașini, 448 pe 1–3 mașini; 5784 de plasări |
+| prevalența gradată (§6.4) | `{1: 363, 2: 64, 3: 21, 5: 1046}` |
+
+Abaterile de la proporțiile de aici (de exemplu 22,1% stres în loc de 20%) sunt
+declarate în aceeași intrare. Corpusul n-a fost încă rulat prin agenți:
+măsurătoarea pe cele cinci endpoint-uri (etapa 2.5) urmează.
+
 ---
 
 ## 1. Corpusul e un instrument, nu un set de date
@@ -41,8 +57,9 @@ piardă?".
 rezultatele.** Un strat de stres mărit fiindcă „banda nu se declanșează destul"
 înseamnă un corpus ales ca să iasă cifra.
 
-Proporțiile se fixează în intrarea de tip `masuratoare` din jurnal, înainte de
-rulare, sub aceeași disciplină de pre-înregistrare ca restul montajului.
+Proporțiile se fixează în fișa de măsurătoare din jurnal (`METRICS.md` §9.2),
+înainte de rulare, sub aceeași disciplină de pre-înregistrare ca restul
+montajului.
 Variantele se rulează ca **experimente separate**, fiecare cu eticheta lui de
 rulare (`METRICS.md` §9), și se raportează toate — nu doar cea care iese bine.
 
@@ -329,7 +346,7 @@ reproducă rezultatul ia lista de hash-uri, își reconstituie corpusul din
 aceleași surse și rulează. Fără el, „am testat pe 1500 de fișiere" rămâne o
 afirmație pe încredere.
 
-Lanțul e complet: intrarea `masuratoare` din jurnal poartă eticheta rulării,
+Lanțul e complet: fișa de măsurătoare din jurnal poartă eticheta rulării,
 eticheta identifică datele în serverul de măsurare, manifestul identifică ce a
 intrat în corpus.
 
