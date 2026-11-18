@@ -327,8 +327,9 @@ Evenimentul se acceptă și atunci: refuzat cu 5xx, disponibilitatea telemetriei
 fi cuplată de cea a reputației, iar coada at-least-once (§1.3) ar reîncerca la
 nesfârșit un eveniment perfect valid.
 
-**Nu se publică o rată de închidere.** Ar cere maparea *dispoziție → închis*, iar
-aceea e decizia benzii de incertitudine (§L2.7), nu a unui tabel. Cazul care o
+**Nu se publică o rată de închidere aici.** Ar cere maparea *dispoziție → închis*, iar
+aceea e decizia benzii de incertitudine (§L2.7), nu a acestui tabel. De la P2.6
+banda minimă are cifra ei, la §3.7, cu politica declarată lângă ea. Cazul care o
 face nebanală e `known_software`: numărat ca închis, ar transforma apartenența la
 o listă de software cunoscut în verdict de benignitate — exact ce interzice
 `CORPUS.md` §5.4, doar că pe ușa din dos a unei metrici. Se publică deci
@@ -378,10 +379,19 @@ Ce s-a răspuns atunci nu se pierde: se raportează separat, ca
 au sosit la un conținut pe care parcul îl vedea prima oară, față de unul pe care
 îl știa deja.
 
-**Nu se publică nicio economie.** „Câte escaladări a evitat parcul" cere să se
+**„Prima oară" înseamnă că registrul nu avea conținutul înainte de eveniment**,
+indiferent de mașină — nu `agents == 1`. A doua vedere a aceluiași conținut pe
+aceeași mașină tot `1` dă, deci regula după `agents` ar număra două prime vederi
+pentru un singur conținut, iar invarianta „pe memorie goală, primele vederi sunt
+cât conținuturile distincte" ar cădea exact când o mașină trimite două
+evenimente pentru același fișier. Valoarea se consemnează la ingestie, în
+`event_band` (§3.7); evenimentele fără rând păstrează regula veche, iar câte au
+fost decise așa se publică, ca `first_sighting_inferred_from_agents`.
+
+**Nu se publică nicio economie aici.** „Câte escaladări a evitat parcul" cere să se
 știe care evenimente ar fi escaladat, iar decizia aceea aparține benzii de
-incertitudine (§L2.7). Tabelul numără; interpretarea rămâne a pasului care are
-dreptul s-o facă.
+incertitudine (§L2.7). Tabelul numără; interpretarea rămâne a benzii, care o
+publică la §3.7, ca `inherit`.
 
 **Registrul NU se amprentează.** Spre deosebire de instantaneul de reputație, se
 schimbă în timpul rulării, deci o amprentă ar fi falsă înainte ca rularea să se
@@ -400,6 +410,98 @@ de prevalență — scrise înainte ca registrul să existe — se raportează c
 au **raportat** conținutul, nu pe cele care îl au. Un endpoint oprit, unul cu
 coada plină sau unul care n-a atins încă directorul monitorizat lipsesc din
 număr, iar cifra e prin urmare o subestimare.
+
+### 3.7 Banda minimă la T0
+
+**Definiție.** Pentru fiecare eveniment cu hash, ce ar face protocolul la T0: se
+închide sau urcă pe scară, și din care rând al tabelului de decizie. Nu se
+escaladează nimic în realitate: pe fir `next_action` rămâne `"none"`, iar decizia
+stă în depozit, în `event_band`, nu în răspuns. Contractul de fir nu se schimbă.
+
+**Tabelul de decizie, politica `t0-min-1`.** Primul rând care se potrivește
+câștigă; „văzut înainte" înseamnă că registrul de prevalență avea conținutul
+înainte de eveniment (§3.6).
+
+| rând | dispoziție | văzut înainte | decizie |
+|---|---|---|---|
+| 1 | `known_malicious`, `both_axes` | oricum | `close_threat` |
+| 2 | `reputation_unavailable` | oricum | `hold` |
+| 3 | `unknown` | nu | `escalate` |
+| 4 | `unknown` | da | `inherit` |
+| 5 | `known_software` | oricum | `close_known` |
+
+O dispoziție pe care tabelul n-o cunoaște nu primește decizie: evenimentul
+rămâne fără rând și se numără ca gol, sub numele ei.
+
+**Ordinea rândurilor e decizia de securitate.** Amenințarea vine prima, ca
+prevalența să n-o poată depăși. Indisponibilitatea vine înaintea lui `unknown`,
+ca o pană a depozitului să nu arate ca un corpus nou (§3.5).
+
+**Prevalența nu închide benign nimic.** `CORPUS.md` §5.4 interzice ca RDS să dea
+„curat", deci singura dovadă care ar putea închide benign la T0 ar fi
+prevalența. Regula „pe `k` mașini ⇒ închis" e respinsă: într-un parc de cinci,
+`k = 3` transformă coada de 3% a malware-ului (`CORPUS.md` §6.4) în ratări
+construite prin proiectare, iar §4.3 fixează ratările la zero. Prevalența e aici
+dovada că parcul a plătit deja escaladarea conținutului — `inherit`. Verdictul
+vine din escaladare (T1 și mai sus). Singura ieșire de la T0 care se termină fără
+semnalare e `close_known`, care spune doar „nu necesită escaladare din motiv de
+noutate" (`CORPUS.md` §5.4) și nu depinde de prevalență.
+
+**Un fișier malițios pe toate mașinile.** Pe axa de amenințare: `close_threat` la
+fiecare sosire. Necunoscut: o escaladare și restul moșteniri, deci un verdict,
+comparat pe amprentă (§4.1) — o eventuală ratare e una, nu una per mașină. Doar
+în RDS: `close_known` pe toate, la fel ca pe una. Corpusul nu conține cazul
+(malware-ul stă pe 1–3 mașini), deci e acoperit de teste, nu de măsurătoare.
+
+**Vechimea nu intră.** În laborator toate vârstele sunt de minute sau ore, deci
+niciun rând pe vechime n-ar fi exercitat. `first_seen` rămâne stocat și intră
+odată cu T1.
+
+**Cifra publicată e tabelul, nu rata.** Secțiunea `band` din
+`GET /api/metrics/disclosure` dă celulele — dispoziție × văzut înainte ×
+`agents_at_arrival` — pe numitorul `events_with_hash` de la §3.5. Orice politică
+de forma *decizie = f(dispoziție, văzut înainte)* se citește din ele fără altă
+rulare, iar `agents` brut păstrează și politicile pe prevalență. Alături:
+politicile, rând cu rând; deciziile fiecărei politici, calculate din celule;
+deciziile stocate și dacă ele coincid cu tabelul (`stored_matches_table` — un
+tabel schimbat sub o rulare deja făcută ar descrie altă politică decât cea care a
+decis).
+
+**Două politici, pre-înregistrate amândouă.** `t0-min-1`, cea declarată și
+stocată, și `t0-min-1-strict`, care tratează `known_software` ca `unknown`. A
+doua se calculează din aceleași celule. Scrise amândouă înainte de măsurătoare,
+niciuna nu poate fi aleasă după ce se văd datele.
+
+**Golurile, ca la §2.1.** `hashed_events_without_band` — evenimente cu hash fără
+rând: scrise înainte de P2.6 sau cu o dispoziție necunoscută tabelului. Se
+defalcă pe dispoziție, în `without_band_by_disposition`; cele fără nicio
+dispoziție, scrise înainte de P2.3, apar ca `without_disposition`, numele
+golului de la §3.5.
+`inherited_without_escalation` — `inherit` al cărui conținut n-are niciun
+`escalate` în toată baza: prima vedere a fost `hold`, a fost scrisă înainte de
+bandă, registrul e murdar, sau prima sosire a eșuat după ce își înregistrase
+vederea. Ultimul caz vine din ordinea ingestiei: vederea se scrie în registru,
+cu commit, înaintea evenimentului, deci dacă inserarea evenimentului pică,
+retransmisia își găsește propria vedere și primește `inherit` în loc de
+`escalate`. Ordinea e de dinainte de bandă; tot ea face ca, la §3.6, aceeași
+retransmisie să se numere ca vedere anterioară, nu ca primă vedere. Moștenire
+fără de la cine.
+
+**Criteriile de infirmare 1 și 5 au aici doar o margine superioară.** Ce
+escaladează la T0 e plafonul pentru ce ajunge la T2 și pentru ce se poate abține
+mai sus pe scară. Dacă plafonul e deja sub pragul criteriului 1, afirmația e
+trivială fără T1. Pragurile se fixează pe acest tabel, înaintea oricărui rezultat
+T1.
+
+**O rulare cu `hold > 0` nu e comparabilă cu una fără**: o parte din corpus n-a
+primit nicio decizie, iar partea aceea nu e aleasă la întâmplare.
+
+**Predicția, înainte de măsurătoare** (braț semiînzestrat, bază goală, o rulare
+cu tot corpusul): `escalate` = 589, câte un eveniment per conținut necunoscut
+(164 compilate, 290 instalatoare, 135 de sistem); `close_threat` = plasările
+celor 330 de mostre; `close_known` = plasările celor 575 de conținuturi din RDS;
+`inherit` = evenimentele conținuturilor necunoscute minus 589; `hold` și
+`inherited_without_escalation` = 0. În brațul rece, `escalate` = 919.
 
 ---
 
