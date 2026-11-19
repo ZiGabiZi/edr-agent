@@ -1,6 +1,6 @@
 # Dependente directe
 requests==2.34.2
-watchdog==6.0.0
+watchdog==7.1.0
 
 # Tranzitive ale lui requests, fixate ca sa fie reproductibil tot arborele
 certifi==2026.6.17

@@ -201,7 +201,7 @@ Pune secretul de înrolare în `enrollment_secret`, apoi:
 .venv\Scripts\python.exe agent.py
 ```
 
-Testele — **318**, fără rețea și fără server:
+Testele — **326**, fără rețea și fără server:
 
 ```bash
 .venv\Scripts\python.exe -m unittest discover -s tests
@@ -228,10 +228,20 @@ comportă watchdog — câte evenimente emite, în ce ordine — iar un test cu 
 nu poate infirma presupunerea, pentru că el *este* presupunerea.
 
 **Măsoară, nu presupune.** Un issue bănuia că watchdog pierde evenimente sub
-rafală. Măsurătoarea a arătat 10.000 din 10.000 livrate la 1577 de scrieri pe
-secundă — iar pierderea era în întregime internă: un plafon de zece fișiere pe
-secundă într-o buclă proprie, care după reparație a devenit ~170. Issue-ul a fost
-rescris cu cifrele, cu ipoteza inițială păstrată vizibil.
+rafală. Măsurătoarea, făcută cu watchdog 6.0.0, a arătat 10.000 din 10.000
+livrate la 1577 de scrieri pe secundă — iar pierderea era în întregime internă:
+un plafon de zece fișiere pe secundă într-o buclă proprie, care după reparație a
+devenit ~170. Issue-ul a fost rescris cu cifrele, cu ipoteza inițială păstrată
+vizibil.
+
+**watchdog e fixat pe versiune, iar corecturile peste el stau într-un singur
+loc.** Pe o clonă cu două procesoare, 6.0.0 închidea de două ori handle-ul unui
+director șters, iar procesul cădea cu `Fatal Python error: _PySemaphore_Wakeup`.
+7.1.0 repară asta, dar aduce o cursă care poate bloca oprirea la nesfârșit;
+`services/watchdog_compat.py` o corectează, iar `tests/test_watchdog_compat.py`
+pică la orice altă versiune, ca să fie revăzută. Tot de la 7.0, o scriere a
+cărei dată rămâne în urmă, cum e cea a unei copieri, sosește ca schimbare de
+atribute; agentul o tratează ca modificare, la fel ca înainte.
 
 Aceeași metodă a curățat payload-ul: măsurarea liniei de bază a arătat că cel mai
 scump câmp trimis la fiecare fișier, `description` — 16,7% din payload-ul unui

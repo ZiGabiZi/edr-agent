@@ -26,7 +26,7 @@ import os
 import tempfile
 import unittest
 
-from watchdog.events import FileCreatedEvent
+from watchdog.events import DirAttribEvent, FileAttribEvent, FileCreatedEvent
 
 import agent
 from services.file_hasher import FileHasher
@@ -34,6 +34,7 @@ from services.file_monitor import (
     EDRFileEventHandler,
     SettleReleaser,
     build_file_event_payload,
+    normalize_file_path,
 )
 from services.settle_tracker import SettleTracker
 from tests.wire_contract import (
@@ -451,6 +452,42 @@ class FileEventWiringTests(unittest.TestCase):
         self.assertIn("sha256", captured[0])
         self.assertIn("settle_wait_ms", captured[0]["measurements"])
         self.assertIn("hash_duration_ms", captured[0]["measurements"])
+
+
+class _RecordingTracker:
+    def __init__(self) -> None:
+        self.observed: list = []
+
+    def observe(self, path: str, event_type: str) -> None:
+        self.observed.append((path, event_type))
+
+
+class AttribEventRoutingTests(unittest.TestCase):
+    """
+    watchdog 7.0 a introdus FileAttribEvent, livrat la on_attrib(), nu la
+    on_modified(). Handler-ul agentului îl tratează ca modificare, cum îl
+    trata watchdog 6.0.0 (file_monitor.py::EDRFileEventHandler.on_attrib).
+    Rutarea trece prin dispatch(), adică prin calea reală a lui watchdog.
+    """
+
+    def setUp(self) -> None:
+        self.tracker = _RecordingTracker()
+        self.handler = EDRFileEventHandler(
+            monitored_directories=["C:/tmp"],
+            tracker=self.tracker,  # type: ignore[arg-type]
+            logger=logging.getLogger("test"),
+        )
+
+    def test_a_file_attrib_event_is_observed_as_a_modification(self) -> None:
+        self.handler.dispatch(FileAttribEvent("C:/tmp/copiat.bin"))
+        self.assertEqual(
+            self.tracker.observed,
+            [(normalize_file_path("C:/tmp/copiat.bin"), "file_modified")],
+        )
+
+    def test_a_directory_attrib_event_is_ignored(self) -> None:
+        self.handler.dispatch(DirAttribEvent("C:/tmp/subdirector"))
+        self.assertEqual(self.tracker.observed, [])
 
 
 if __name__ == "__main__":

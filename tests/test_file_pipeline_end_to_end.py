@@ -30,6 +30,7 @@ Ce e diferit la testele de aici, și de ce merită știut înainte de a le ating
 """
 
 import hashlib
+import os
 import tempfile
 import time
 import unittest
@@ -224,6 +225,32 @@ class FilePipelineEndToEndTests(unittest.TestCase):
         self.assertEqual(
             [event["sha256"] for event in events].count(None), 0, "ambele trebuie hash-uite"
         )
+
+    def test_a_change_watchdog_classifies_as_attributes_is_still_observed(self) -> None:
+        """
+        De la watchdog 7.0, pe Windows, o schimbare a cărei dată de scriere
+        rămâne în urma datei de schimbare sosește ca FileAttribEvent, nu ca
+        FileModifiedEvent. Așa arată scrierile unei copieri, fiindcă CopyFile
+        pune pe copie data sursei. Fără on_attrib() în handler, tracker-ul n-ar
+        afla de ele.
+
+        Schimbarea doar a datei e cel mai simplu mod de a produce exact
+        clasificarea asta. Cu 6.0.0 dădea o a doua observație, deci un al
+        doilea eveniment cu aceeași amprentă; comportamentul se păstrează.
+        """
+        self._start_monitor()
+        path = self.watched_dir / "copiat.bin"
+        path.write_bytes(b"continut-copiat")
+        first = self._wait_for_events(1)
+        self.assertEqual(len(first), 1)
+
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+
+        events = self._wait_for_events(2)
+        self.assertEqual(
+            len(events), 2, "schimbarea clasificată drept atribute n-a fost observată"
+        )
+        self.assertEqual(events[0]["sha256"], events[1]["sha256"])
 
     def test_the_event_reaches_the_persistent_spool_and_wakes_the_dispatcher(self) -> None:
         """

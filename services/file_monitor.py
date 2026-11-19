@@ -9,6 +9,7 @@ from typing import Callable, FrozenSet, Iterable, Optional
 from watchdog.events import FileMovedEvent, FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from services import watchdog_compat
 from services.file_event import (  # noqa: F401  (reexportate pentru apelanții existenți)
     FileEventCallback,
     build_file_event_payload,
@@ -30,6 +31,10 @@ from services.settle_tracker import (
 
 
 DEFAULT_MONITORED_EXTENSIONS: FrozenSet[str] = frozenset()
+
+# Oprirea cititorului de director din watchdog 7.1.0 se poate bloca pe Windows;
+# corectura și motivul ei: services/watchdog_compat.py.
+watchdog_compat.apply()
 
 # Cât de des verifică firul de eliberare dacă tracker-ul are fișiere gata de
 # raportat. Valoarea adaugă cel mult atâta latență peste perioada de liniște,
@@ -125,6 +130,26 @@ class EDRFileEventHandler(FileSystemEventHandler):
 
     def on_modified(self, event: FileSystemEvent) -> None:
         """Procesează modificarea unui fișier existent."""
+        if not event.is_directory:
+            self._handle_file_event(os.fsdecode(event.src_path), "file_modified")
+
+    def on_attrib(self, event: FileSystemEvent) -> None:
+        """
+        Procesează o schimbare pe care watchdog o clasifică drept metadate.
+
+        De la watchdog 7.0, pe Windows 10 (1709+), ReadDirectoryChangesExW
+        desparte FILE_ACTION_MODIFIED în două: modificare, când data ultimei
+        scrieri e cea mai nouă, și atribute, când data schimbării o depășește.
+        Clasificarea se sprijină pe datele fișierului, nu pe ce s-a întâmplat
+        cu conținutul. CopyFile pune pe copie data de scriere a SURSEI, deci
+        scrierile unei copieri în curs pot sosi aici, nu la on_modified, iar
+        tracker-ul n-ar mai afla că fișierul încă se schimbă.
+
+        Până la 6.0.0 toate erau on_modified. Le tratăm la fel, ca agentul să
+        observe exact ce observa înainte; o schimbare doar de atribute costă
+        cel mult o amprentă recalculată, iar una de conținut ratată ar costa o
+        amprentă greșită.
+        """
         if not event.is_directory:
             self._handle_file_event(os.fsdecode(event.src_path), "file_modified")
 
@@ -566,24 +591,21 @@ class FileMonitor:
         cheiază emitter-ele după (cale, recursiv, filtru) și, găsind-o deja,
         atașează handler-ul la emitter-ul vechi, oprit.
 
-        Pe Windows, emitter-ul oprit la ștergere și-a închis deja handle-ul de
-        director (read_directory_changes.py: on_thread_stop), dar nu-l golește.
-        unschedule() îl oprește încă o dată, deci l-ar închide a doua oară, iar
-        între timp valoarea numerică poate aparține altui obiect al procesului:
-        fișierul spool-ului, un socket, handle-ul unui emitter nou. Golirea
-        _whandle pe un emitter deja oprit face a doua oprire inofensivă.
-        stopped_event, nu is_alive(): evenimentul se setează înainte de
-        închidere, firul moare abia după. Presupunerea e fixată pe watchdog
-        6.0.0 de tests/test_monitoring_state.py::DirectoryRecoveryTests.
-        Pe Linux, inotify își golește singur referința, deci n-are nevoie.
+        Emitter-ul oprit la ștergere e oprit aici încă o dată, de unschedule().
+        Până la watchdog 6.0.0, pe Windows, a doua oprire închidea a doua oară
+        același handle de director, iar valoarea lui numerică putea aparține
+        între timp altui obiect al procesului: fișierul spool-ului, un socket,
+        semaforul unui lacăt din Python. Agentul golea aici _whandle, dar
+        observer.stop() la oprirea agentului rămânea neacoperit: pe o clonă cu
+        două procesoare, testele cădeau cu „Fatal Python error:
+        _PySemaphore_Wakeup: ReleaseSemaphore failed (error: 6)". Din 7.0,
+        on_thread_stop() scoate cititorul sub lacăt înainte să-l oprească, deci
+        a doua oprire nu mai închide nimic. Presupunerea e fixată pe watchdog
+        7.1.0 de tests/test_monitoring_state.py::DirectoryRecoveryTests.
         """
         watch = self._watch_for_directory.pop(directory, None)
-        emitter = self._emitter_for_directory.pop(directory, None)
+        self._emitter_for_directory.pop(directory, None)
         self._identity_for_directory.pop(directory, None)
-
-        if emitter is not None and emitter.stopped_event.is_set():
-            if hasattr(emitter, "_whandle"):
-                emitter._whandle = None
 
         if watch is not None:
             self.observer.unschedule(watch)

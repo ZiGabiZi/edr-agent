@@ -420,21 +420,22 @@ class DirectoryRecoveryTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "handle-ul de director e specific Windows")
     def test_a_dead_emitter_handle_is_not_closed_a_second_time(self) -> None:
         """
-        Fixează presupunerea despre watchdog 6.0.0 din _unschedule_directory():
-        emitter-ul oprit la ștergere își păstrează handle-ul deja închis, iar
-        unschedule() l-ar închide din nou — posibil peste alt obiect.
+        Fixează presupunerea despre watchdog 7.1.0 din _unschedule_directory():
+        emitter-ul oprit la ștergere și-a scos deja cititorul, deci a doua
+        oprire, din unschedule() sau din observer.stop(), nu mai închide niciun
+        handle. Cu 6.0.0 îl închidea a doua oară, posibil peste alt obiect.
         """
-        from watchdog.observers import read_directory_changes
+        from watchdog.observers import winapi
 
         monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
         old_emitter = self._wait_for_dead_emitter_after_rmtree(monitor)
-        self.assertIsNotNone(old_emitter._whandle)
+        self.assertIsNone(old_emitter._reader)
 
-        with patch.object(read_directory_changes, "close_directory_handle") as close:
+        with patch.object(winapi, "_close_directory_handle") as close:
             monitor.recover_directories_once()
+            old_emitter.stop()
 
         close.assert_not_called()
-        self.assertIsNone(old_emitter._whandle)
 
     def test_a_moved_directory_is_released_and_rewatched_when_replaced(self) -> None:
         monitor = self._start([self.kept, self.doomed], recovery_poll_seconds=3600)
