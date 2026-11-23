@@ -201,7 +201,7 @@ Pune secretul de înrolare în `enrollment_secret`, apoi:
 .venv\Scripts\python.exe agent.py
 ```
 
-Testele — **326**, fără rețea și fără server:
+Testele — **330**, fără rețea și fără server:
 
 ```bash
 .venv\Scripts\python.exe -m unittest discover -s tests
