@@ -252,6 +252,53 @@ class FilePipelineEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(events[0]["sha256"], events[1]["sha256"])
 
+    @unittest.skipUnless(os.name == "nt", "data ultimului acces e anunțată așa doar pe Windows")
+    def test_the_agent_does_not_see_its_own_read_as_a_modification(self) -> None:
+        """
+        Dublura din măsurătoarea 2.5, reprodusă pe lanțul real.
+
+        Un fișier cu data de acces veche intră în zonă prin redenumire, ca la
+        eliberarea corpusului. Amprentarea îl citește, iar Windows îi actualizează
+        data accesului. Cât timp cititorul cerea și LAST_ACCESS, schimbarea sosea
+        ca file_modified, iar fișierul era raportat a doua oară, cu aceeași
+        amprentă. Pentru un fișier proaspăt Windows nu actualizează data, de
+        aceea data se mută cu două zile în urmă: fără pasul ăsta testul ar
+        trece și fără corectură.
+
+        Absența nu se poate aștepta pe o condiție, deci se așteaptă un martor:
+        un al doilea fișier, scris după primul eveniment. Schimbarea de acces
+        sosește la citire, înaintea primului eveniment, deci o dublură s-ar
+        stabiliza și s-ar amprenta înaintea martorului.
+        """
+        outside = tempfile.TemporaryDirectory(prefix="edr-e2e-outside-", dir=self.watched_dir.parent)
+        self.addCleanup(outside.cleanup)
+        source = Path(outside.name) / "vechi.bin"
+        content = b"continut-cu-data-de-acces-veche" * 1024
+        source.write_bytes(content)
+        two_days_ago = time.time() - 2 * 86400
+        os.utime(source, (two_days_ago, two_days_ago))
+
+        self._start_monitor()
+        os.replace(source, self.watched_dir / "vechi.bin")
+
+        first = self._wait_for_events(1)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["sha256"], hashlib.sha256(content).hexdigest())
+
+        (self.watched_dir / "martor.bin").write_bytes(b"martor")
+        _wait_until(
+            lambda: any(Path(e["file_path"]).name == "martor.bin" for e in self._spooled_events())
+        )
+        events = self._spooled_events()
+
+        names = [Path(e["file_path"]).name for e in events]
+        self.assertEqual(
+            names,
+            ["vechi.bin", "martor.bin"],
+            f"citirea amprentării a produs un eveniment în plus: "
+            f"{[(Path(e['file_path']).name, e['event_type']) for e in events]}",
+        )
+
     def test_the_event_reaches_the_persistent_spool_and_wakes_the_dispatcher(self) -> None:
         """
         Ultimele două verigi: coada e cea persistentă, iar producătorul chiar

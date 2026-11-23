@@ -2,8 +2,11 @@
 Corecturile locale peste watchdog, fixate pe versiunea din requirements.txt.
 =============================================================================
 
-De ce există
-------------
+Sunt două: oprirea cititorului de director și lista de schimbări pe care o
+cere. Amândouă privesc numai Windows.
+
+Prima corectură: oprirea cititorului
+------------------------------------
 Pe Windows, watchdog 7.1.0 citește directorul pe un fir separat
 (winapi.DirectoryChangeReader), blocat în ReadDirectoryChangesExW până apare o
 schimbare. Oprirea îl trezește cu CancelIoEx și apoi îl așteaptă cu join() fără
@@ -28,12 +31,42 @@ cititorului, până când firul chiar s-a terminat. Lacătul e cel sub care firu
 își golește handle-ul înainte să-l închidă, deci anularea nu atinge niciodată un
 handle închis.
 
+A doua corectură: cititorul nu mai cere schimbările datei de acces
+-----------------------------------------------------------------
+watchdog cere sistemului opt tipuri de schimbări (winapi.
+WATCHDOG_FILE_NOTIFY_FLAGS), printre ele FILE_NOTIFY_CHANGE_LAST_ACCESS. O
+citire nu schimbă conținutul, dar poate schimba data ultimului acces, iar
+Windows o anunță ca FILE_ACTION_MODIFIED, ca pe o scriere. watchdog 7 o
+clasifică drept atribute (data schimbării, mutată de redenumire, e mai nouă
+decât data scrierii), iar agentul tratează atributele ca modificare
+(file_monitor.py::EDRFileEventHandler.on_attrib). Rezultatul: agentul își
+vedea propria citire. Amprentarea citea fișierul, data accesului se schimba, iar
+fișierul revenea ca file_modified, cu aceeași amprentă.
+
+Măsurat pe 23 noiembrie 2026, pe clona Endpoint01, în rularea de măsurătoare
+2.5: fiecare din cele 400 de fișiere eliberate a dat file_created urmat de
+file_modified, iar ordinea dublurilor era exact ordinea amprentării, fără
+nicio inversiune. Apoi, cu agentul oprit, câte un cititor pe fiecare tip de
+schimbare: un fișier citit a dat FILE_ACTION_MODIFIED pe LAST_ACCESS imediat
+la citire, numai dacă data lui de acces era mai veche de o oră. Pentru
+fișierele proaspete Windows nu actualizează data, de aceea probele cu fișiere
+generate pe loc n-au arătat nimic. fsutil arăta DisableLastAccess = 2, adică
+actualizarea ar fi trebuit să fie oprită, iar data tot s-a actualizat. Setarea
+nu e deci o apărare.
+
+Tipul acesta se scoate din listă și doar el. O schimbare de conținut schimbă
+data scrierii sau mărimea, iar acelea rămân cerute (LAST_WRITE, SIZE), deci nu
+se pierde nicio scriere. Rămân cerute și numele, atributele, securitatea și
+data creării: corectura scoate exact sursa auto-observării, nu și alte
+schimbări de metadate, pe care agentul le observa și înainte.
+
 De ce e fixată pe versiune
 --------------------------
-Corectura înlocuiește o metodă internă. O altă versiune de watchdog poate avea
-alt cititor, deci se aplică numai versiunii verificate, iar
-tests/test_watchdog_compat.py pică la orice schimbare de versiune, ca să fie
-revăzută odată cu ea.
+Prima corectură înlocuiește o metodă internă, a doua o constantă a modulului
+winapi, citită la fiecare apel de ReadDirectoryChangesExW. O altă versiune de
+watchdog poate avea alt cititor sau altă listă, deci se aplică numai versiunii
+verificate, iar tests/test_watchdog_compat.py pică la orice schimbare de
+versiune, ca să fie revăzută odată cu ea.
 """
 
 import os
@@ -72,9 +105,20 @@ def _stop_until_the_reader_exits(self) -> None:
             return
 
 
+def content_notify_flags() -> int:
+    """
+    Tipurile de schimbări pe care le cere agentul: cele din watchdog, fără data
+    ultimului acces. Calculate din lista originală, nu scrise de mână, ca orice
+    alt tip din ea să rămână cerut.
+    """
+    from watchdog.observers import winapi
+
+    return winapi.WATCHDOG_FILE_NOTIFY_FLAGS & ~winapi.FILE_NOTIFY_CHANGE_LAST_ACCESS
+
+
 def apply() -> bool:
     """
-    Aplică corectura o singură dată. Întoarce True dacă e activă.
+    Aplică ambele corecturi o singură dată. Întoarce True dacă sunt active.
 
     Pe alt sistem decât Windows cititorul nu există, deci nu e nimic de
     corectat. Pe altă versiune de watchdog nu se aplică nimic: testul de
@@ -89,6 +133,7 @@ def apply() -> bool:
         from watchdog.observers import winapi
 
         winapi.DirectoryChangeReader.stop = _stop_until_the_reader_exits
+        winapi.WATCHDOG_FILE_NOTIFY_FLAGS = content_notify_flags()
         _applied = True
 
     return True

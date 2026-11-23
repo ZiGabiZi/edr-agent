@@ -32,8 +32,10 @@ from services.settle_tracker import (
 
 DEFAULT_MONITORED_EXTENSIONS: FrozenSet[str] = frozenset()
 
-# Oprirea cititorului de director din watchdog 7.1.0 se poate bloca pe Windows;
-# corectura și motivul ei: services/watchdog_compat.py.
+# Pe Windows, watchdog 7.1.0 primește două corecturi: oprirea cititorului de
+# director, care se putea bloca, și lista de schimbări cerute, fără data
+# ultimului acces, ca agentul să nu-și vadă propria citire. Motivele:
+# services/watchdog_compat.py.
 watchdog_compat.apply()
 
 # Cât de des verifică firul de eliberare dacă tracker-ul are fișiere gata de
@@ -149,6 +151,11 @@ class EDRFileEventHandler(FileSystemEventHandler):
         observe exact ce observa înainte; o schimbare doar de atribute costă
         cel mult o amprentă recalculată, iar una de conținut ratată ar costa o
         amprentă greșită.
+
+        Schimbarea datei ultimului acces ajungea tot aici și era cea mai
+        frecventă: o producea chiar citirea amprentării, deci fiecare fișier
+        revenea o dată ca file_modified. Nu mai ajunge, fiindcă cititorul
+        nu mai cere tipul acesta (services/watchdog_compat.py).
         """
         if not event.is_directory:
             self._handle_file_event(os.fsdecode(event.src_path), "file_modified")

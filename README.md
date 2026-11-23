@@ -241,7 +241,11 @@ director șters, iar procesul cădea cu `Fatal Python error: _PySemaphore_Wakeup
 `services/watchdog_compat.py` o corectează, iar `tests/test_watchdog_compat.py`
 pică la orice altă versiune, ca să fie revăzută. Tot de la 7.0, o scriere a
 cărei dată rămâne în urmă, cum e cea a unei copieri, sosește ca schimbare de
-atribute; agentul o tratează ca modificare, la fel ca înainte.
+atribute; agentul o tratează ca modificare, la fel ca înainte. A doua corectură
+scoate din ce cere watchdog schimbarea datei ultimului acces: citirea
+amprentării o producea, iar în măsurătoarea 2.5 fiecare fișier a fost raportat
+de două ori, cu aceeași amprentă. O scriere schimbă data scrierii sau mărimea,
+care rămân cerute, deci nu se pierde nicio modificare de conținut.
 
 Aceeași metodă a curățat payload-ul: măsurarea liniei de bază a arătat că cel mai
 scump câmp trimis la fiecare fișier, `description` — 16,7% din payload-ul unui

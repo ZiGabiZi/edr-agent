@@ -1,5 +1,8 @@
 """
-Corectura de oprire peste watchdog 7.1.0 (services/watchdog_compat.py).
+Corecturile peste watchdog 7.1.0 (services/watchdog_compat.py): oprirea
+cititorului și lista de schimbări cerute, fără data ultimului acces. Efectul
+celei de-a doua pe lanțul real e verificat în
+tests/test_file_pipeline_end_to_end.py.
 
 Cursa reală e rară, deci nu se poate aștepta într-un test. Se reproduce
 determinist: prima anulare se pierde, exact ce se întâmplă când CancelIoEx
@@ -78,6 +81,37 @@ class ReaderStopTests(unittest.TestCase):
 
         self.assertFalse(stopper.is_alive())
         self.assertIsNone(reader._handle)
+
+    def test_the_reader_no_longer_asks_for_last_access_changes(self) -> None:
+        """
+        Data ultimului acces o schimbă și citirea amprentării, deci cererea ei
+        făcea agentul să-și vadă propria citire ca file_modified.
+        """
+        flags = self.winapi.WATCHDOG_FILE_NOTIFY_FLAGS
+        self.assertEqual(flags & self.winapi.FILE_NOTIFY_CHANGE_LAST_ACCESS, 0)
+
+    def test_every_other_change_type_is_still_requested(self) -> None:
+        """
+        Corectura scoate un singur tip. Lista e cea din watchdog 7.1.0, fără
+        LAST_ACCESS: o scriere schimbă LAST_WRITE sau SIZE, iar redenumirile,
+        atributele, securitatea și data creării rămân și ele observate.
+        """
+        w = self.winapi
+        expected = (
+            w.FILE_NOTIFY_CHANGE_FILE_NAME
+            | w.FILE_NOTIFY_CHANGE_DIR_NAME
+            | w.FILE_NOTIFY_CHANGE_ATTRIBUTES
+            | w.FILE_NOTIFY_CHANGE_SIZE
+            | w.FILE_NOTIFY_CHANGE_LAST_WRITE
+            | w.FILE_NOTIFY_CHANGE_SECURITY
+            | w.FILE_NOTIFY_CHANGE_CREATION
+        )
+        self.assertEqual(w.WATCHDOG_FILE_NOTIFY_FLAGS, expected)
+
+    def test_applying_twice_changes_nothing(self) -> None:
+        before = self.winapi.WATCHDOG_FILE_NOTIFY_FLAGS
+        self.assertTrue(watchdog_compat.apply())
+        self.assertEqual(self.winapi.WATCHDOG_FILE_NOTIFY_FLAGS, before)
 
     def test_a_second_stop_returns_at_once(self) -> None:
         reader = self.winapi.DirectoryChangeReader(self.directory, recursive=True)
