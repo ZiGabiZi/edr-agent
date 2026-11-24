@@ -518,7 +518,34 @@ fără de la cine.
 escaladează la T0 e plafonul pentru ce ajunge la T2 și pentru ce se poate abține
 mai sus pe scară. Dacă plafonul e deja sub pragul criteriului 1, afirmația e
 trivială fără T1. Pragurile se fixează pe acest tabel, înaintea oricărui rezultat
-T1.
+T1, ca să nu poată fi alese după ce se vede cât ajunge la T2.
+
+**Pragurile, fixate pe 24 noiembrie 2026**, după prima rulare cu tot corpusul pe
+cele cinci endpoint-uri (eticheta `masuratoare-2.5-parc-esalonat-r2`), înainte de
+orice cod T1:
+
+- **Unitatea:** conținuturile distincte ale corpusului (1494), nu evenimentele.
+  Parcul plătește escaladarea unui conținut o singură dată, iar `inherit` nu mai
+  urcă. Evenimentele se raportează alături.
+- **Brațul:** cel rece (§8.1). În brațul semiînzestrat tot stratul malițios se
+  închide la T0, deci nicio mostră n-ar ajunge la T2, iar pragurile ar măsura
+  instantaneul, nu protocolul. Brațul semiînzestrat se raportează alături.
+- **Politica:** `t0-min-1`, cea declarată; `t0-min-1-strict` se raportează ca
+  verificare de sensibilitate.
+- **Criteriul 1, trivialitatea:** afirmația e trivială dacă ajung la T2 mai
+  puțin de **100** de conținuturi distincte. Pragul e un număr, nu un procent,
+  din același motiv ca la §4.3: sub 100 de cazuri nu se poate susține nimic util
+  despre felul în care decide banda.
+- **Criteriul 5, abținerea:** protocolul e inutilizabil dacă se abține pe mai
+  mult de **10%** din conținuturile corpusului, adică pe peste 149 din 1494. Se
+  raportează și ca fracțiune din conținuturile escaladate. Valoarea e o
+  judecată, nu vine dintr-o sursă; legitimă o face doar faptul că e fixată
+  înainte de T1.
+
+**Marginile din rulare.** Brațul rece escaladează 919 conținuturi distincte
+(61,5% din corpus; 919 din 5784 de evenimente, 15,9%), cel semiînzestrat 589
+(39,4%; 10,2% din evenimente). Amândouă stau peste pragul criteriului 1 și peste
+cel al criteriului 5, deci la T0 niciunul dintre criterii nu e decis: decide T1.
 
 **O rulare cu `hold > 0` nu e comparabilă cu una fără**: o parte din corpus n-a
 primit nicio decizie, iar partea aceea nu e aleasă la întâmplare.
